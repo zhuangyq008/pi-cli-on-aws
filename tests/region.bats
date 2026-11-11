@@ -51,7 +51,7 @@ teardown() { teardown_sandbox; }
   export STUB_AWS_RESULTS="us-east-1=ok ap-southeast-1=ok"
   run select_bedrock_region m us-east-1
   [ "$status" -eq 0 ]
-  [ "${lines[-1]}" = us-east-1 ]
+  [ "${lines[${#lines[@]}-1]}" = us-east-1 ]
   [ "$(wc -l <"$STUB_AWS_LOG")" -eq 1 ]
 }
 

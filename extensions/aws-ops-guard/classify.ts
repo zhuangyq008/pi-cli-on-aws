@@ -12,6 +12,7 @@ export { buildStrictCommand, decideBash, STRIP_AWS_CREDENTIALS, withoutAwsCreden
 export type { BashDecision, PolicyOptions } from "./policy.ts";
 export { isCredentialPath, isProtectedPath } from "./paths.ts";
 export { redact } from "./redact.ts";
+export { awsConfigIssues, sanitizeAwsConfig } from "./awsconfig.mjs";
 export type { PathOptions } from "./paths.ts";
 
 // AWS MCP Server 中确定只读的工具；run_script / get_presigned_url 由专门的分析函数处理

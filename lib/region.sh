@@ -24,7 +24,7 @@ classify_probe_error() {
 bedrock_probe() {
   local region="$1" model="$2" err rc=0
   err="$(
-    AWS_MAX_ATTEMPTS=1 AWS_RETRY_MODE=standard timeout "$PI_BEDROCK_PROBE_TIMEOUT" \
+    AWS_MAX_ATTEMPTS=1 AWS_RETRY_MODE=standard run_timeout "$PI_BEDROCK_PROBE_TIMEOUT" \
       aws bedrock-runtime converse --region "$region" --model-id "$model" \
       --messages '[{"role":"user","content":[{"text":"ping"}]}]' \
       --inference-config '{"maxTokens":16}' \
@@ -89,7 +89,7 @@ select_bedrock_region() {
 _probe_others() {
   local model="$1" dir="$2" regions="$3"
   [ -n "$regions" ] || return 0
-  export -f bedrock_probe classify_probe_error log_debug
+  export -f bedrock_probe classify_probe_error log_debug run_timeout
   export PI_BEDROCK_PROBE_TIMEOUT PI_BEDROCK_DEBUG
   # shellcheck disable=SC2016 # 位置参数在子 bash 中展开
   printf '%s\n' "$regions" | xargs -P "$PI_BEDROCK_PROBE_PARALLEL" -I{} \

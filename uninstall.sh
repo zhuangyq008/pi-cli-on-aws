@@ -26,8 +26,9 @@ main() {
   revert_settings "$script_dir"
   remove_ops_integrations
   remove_wrappers
-  remove_rc_block "$HOME/.bashrc"
-  log_info "已移除 ~/.bashrc 中的 pi-bedrock 段落"
+  local rc
+  for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.bash_profile"; do remove_rc_block "$rc"; done
+  log_info "已移除 shell 启动文件中的 pi-bedrock 段落"
   remove_home
   log_info "卸载完成。会话与凭证仍保留在 $PI_CODING_AGENT_DIR（如不需要可手动删除）"
 }
@@ -87,7 +88,7 @@ remove_wrappers() {
 
 remove_home() {
   local home_dir
-  home_dir="$(readlink -f "$PI_BEDROCK_HOME" 2>/dev/null || true)"
+  home_dir="$(resolve_path "$PI_BEDROCK_HOME" 2>/dev/null || true)"
   # 防御：只删除位于 $HOME 下、且带有本工具归属标记的目录
   case "$home_dir" in
     "$HOME"/?*) ;;

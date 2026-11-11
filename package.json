@@ -5,9 +5,11 @@
   "description": "One-shot installer that runs pi coding agent on AWS CloudShell with Amazon Bedrock (Kimi K3.1) as the default model",
   "scripts": {
     "lint": "shellcheck -x install.sh uninstall.sh lib/*.sh bin/pi bin/pi-bedrock-doctor bin/aws-mcp-proxy $(ls tests/e2e/*.sh 2>/dev/null)",
-    "test": "bats tests && npm run -s test:guard",
+    "test": "bats tests && npm run -s test:guard && npm run -s test:models",
     "test:e2e": "bash tests/e2e/cloudshell-sim.sh",
-    "test:guard": "node --experimental-strip-types --no-warnings --test tests/guard/*.test.ts"
+    "test:guard": "node --experimental-strip-types --no-warnings --test tests/guard/*.test.ts",
+    "test:models": "node --test tests/models.test.mjs",
+    "test:e2e:macos": "bash tests/e2e/macos-like.sh"
   },
   "devDependencies": {
     "bats": "1.13.0"

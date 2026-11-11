@@ -24,9 +24,11 @@ _skills_stamp() { printf '%s %s' "$PI_AWS_TOOLKIT_REF" "$PI_AWS_SKILLS"; }
 _skills_manifest() {
   local stage="$1" rules="$2"
   {
-    (cd "$stage" && find . -type f ! -name "$SKILLS_MARKER" -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum)
-    [ -f "$rules" ] && printf 'rules  %s\n' "$(sha256sum <"$rules" | awk '{print $1}')"
-  } | sha256sum | awk '{print $1}'
+    # 输出格式与 GNU `sha256sum` 一致（"<hash>  ./path"），保证各平台计算结果相同
+    (cd "$stage" && find . -type f ! -name "$SKILLS_MARKER" -print0 | LC_ALL=C sort -z |
+      while IFS= read -r -d '' f; do printf '%s  %s\n' "$(sha256_of "$f")" "$f"; done)
+    if [ -f "$rules" ]; then printf 'rules  %s\n' "$(sha256_of "$rules")"; fi
+  } | sha256_of -
 }
 
 # 解压（不可信数据）到独立目录，只复制白名单内的 skill 目录，并去掉符号链接；规则文件写到 RULES_OUT
@@ -48,7 +50,7 @@ _stage_skills() {
   done
   find "$stage" -type l -delete
   local rules="$root/rules/aws-agent-rules.md"
-  if [ -f "$rules" ] && [ ! -L "$rules" ] && [ "$(wc -c <"$rules")" -le "$MAX_RULES_BYTES" ]; then
+  if [ -f "$rules" ] && [ ! -L "$rules" ] && [ "$(($(wc -c <"$rules")))" -le "$MAX_RULES_BYTES" ]; then
     cp "$rules" "$rules_out"
   else
     log_warn "上游 rules/aws-agent-rules.md 缺失、是符号链接或过大，已忽略"

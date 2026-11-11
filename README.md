@@ -27,6 +27,30 @@ pi                    # 开始使用
 
 安装约 1 分钟、占用约 500 MB（CloudShell `$HOME` 上限 1 GB）。安装完成后源码目录可删除；所有文件都在 `$HOME` 下，CloudShell 重启后保留（CloudShell 的 `$HOME` 按区域独立，且 120 天未使用会被清理）。
 
+### 支持的平台
+
+| 平台 | x86_64 | arm64 |
+|---|---|---|
+| AWS CloudShell / Linux | ✓ | ✓ |
+| macOS（bash 3.2 / zsh） | ✓ Intel | ✓ Apple Silicon |
+
+### 在 macOS 本地安装
+
+前提：已安装 [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) 并配置好凭证（`aws configure`、`aws login` 或 `aws sso login`），且该身份有 Bedrock 调用权限。
+
+```bash
+git clone https://github.com/zhuangyq008/pi-cli-on-aws.git
+bash pi-cli-on-aws/install.sh
+source ~/.zshrc
+pi-bedrock-doctor
+pi
+```
+
+- 区域：未设置 `AWS_REGION` 时使用 AWS CLI 配置中的默认区域（`aws configure get region`）
+- 凭证：使用 `default` 以外的 profile 时先 `export AWS_PROFILE=<name>` 再运行 `pi`；仅存在 `default` profile 且未设置凭证变量时，包装器会自动设置 `AWS_PROFILE=default`（pi 需要凭证相关环境变量才会启用 amazon-bedrock）
+- `/model` 默认只显示当前 Bedrock 源区域中可用的模型（见下文"模型列表"）
+- 自动带凭证的只读 `aws` 命令只信任当前用户不可写的 aws 路径：使用官方 pkg 安装的 AWS CLI（`/usr/local/bin/aws`）时可用；Homebrew 安装（`/opt/homebrew/bin` 归当前用户所有）时，bash 中的 `aws` 命令一律需要确认（AWS MCP 不受影响）
+
 ### 示例
 
 ```text
@@ -63,6 +87,14 @@ CloudShell ($HOME 持久化)
 凭证：CloudShell 容器凭证端点（控制台登录身份）——Bedrock、MCP、bash 中的 aws CLI 共用
 ```
 
+### 模型列表
+
+pi 内置的 Bedrock 模型目录约有 200 个模型，其中多数在某个区域并不存在（例如 `us.*` 推理配置文件在 ap-southeast-1 调用会报 `The provided model identifier is invalid`）。安装时会在 Bedrock 源区域做只读查询（`ListInferenceProfiles`、`ListFoundationModels`、`GetFoundationModelAvailability`，**不调用模型**，因此不会触发第三方模型的 Marketplace 自动订阅），只把"区域内存在 + 已授权 + 已开通 + 协议可用"的模型写入 `enabledModels`：
+
+- `/model` 默认只显示这些模型（按 Tab 可切换到 all 查看全部），`Ctrl+P` 也只在这些模型间切换
+- 配额为 0 的模型无法通过只读查询识别，仍可能在调用时限流
+- 开通新模型或更换区域后，重新运行 `install.sh` 即可刷新；`--all-models` 可关闭筛选
+
 ### 两个"区域"
 
 | 概念 | 默认值 | 作用 |
@@ -87,6 +119,7 @@ CloudShell ($HOME 持久化)
 | AWS MCP `aws___run_script`（推荐） | 静态分析代码：每个 AWS 调用都是 `call_boto3(operation_name="完整字面量")` 的读操作时直接执行；写操作、敏感读取、别名 / `exec` / 动态操作名 / `boto3` / 子进程需确认；Athena / Redshift Data / DynamoDB PartiQL 仅当该次调用的 SQL 是完整字面量只读语句时放行 |
 | 其他 AWS MCP 工具 | 文档 / skills / 区域查询 / 任务状态等已知只读工具放行；`get_presigned_url` 的 upload 及未知工具需确认 |
 | bash：普通命令 | **剥离全部 AWS 凭证后执行**（`unset` 凭证变量、禁用共享配置与 IMDS），无需确认——即使分析漏判也无法访问 AWS |
+| bash：简单只读 `aws` 命令（续） | aws 进程读取的是**执行时生成的 `~/.aws` 白名单快照**（作为该进程的 HOME，结束后删除）：config / credentials 按 = 或 : 分隔、任意换行符宽松解析后，只按规范格式写出白名单内的键（region、凭证、sso_*、role_arn 等），`credential_process`、`*endpoint_url`、`ca_bundle`、`ec2_metadata_service_endpoint`、`cli_pager`、`[plugins]`、`[services]` 及所有嵌套设置一律丢弃；只信任当前用户不可写的 aws 可执行文件（含所有上级目录）。依赖 config 中 `ca_bundle` 的环境请改用 `AWS_CA_BUNDLE` 环境变量 |
 | bash：简单只读 `aws` 命令 | 严格白名单（单条 `aws <service> <读操作>`，可接 `jq/grep/head/tail/sort/uniq/wc/cut/column/tr` 与写到当前目录或 `/tmp` 的重定向）**自动执行**：护栏不执行原文，而是用校验后的参数重建命令，**只有 aws 进程获得凭证**（过滤器无凭证）；拒绝 `;` `$` 循环 子 shell、`--endpoint-url/--profile/--debug/--ca-bundle` 及其任意前缀缩写、`file://` 参数、会写本地文件的操作（如 `s3api get-object`）、过滤器的文件参数与危险选项 |
 | bash：其他需要 AWS 的命令 | 循环 / 多命令 / 脚本 / IaC（`cdk deploy`、`terraform apply` ...）/ 写操作：弹窗展示命令与识别出的操作，批准后本条命令带凭证执行 |
 | 敏感读取 | `GetSecretValue`、`GetParameter*`、`GetSessionToken`、`ecr get-login-password`、`eks get-token`、`GetFunctionConfiguration` 等返回凭证 / 密钥的操作；读取 `/proc/*/environ`、容器凭证端点、`~/.aws` 下的缓存 |
@@ -100,7 +133,7 @@ CloudShell ($HOME 持久化)
 - **文件只读**：护栏扩展、包装器与运行时脚本安装为只读
 - pi 的 codemode 嵌套工具调用同样经过护栏
 
-> 边界说明：CloudShell 中用户拥有 sudo，且 pi 进程本身持有凭证，同一用户下无法做到进程级隔离；刻意规避的行为（例如通过调试器读取 pi 进程内存）仍可能获取凭证。护栏的目标是让 **AI 正常产生的命令在漏判时也不会写入 AWS**，并让变更都经过人工确认。面向客户的生产环境请务必配合下面的 IAM 控制。
+> 边界说明：CloudShell 中用户拥有 sudo，且 pi 进程本身持有凭证，同一用户下无法做到进程级隔离；刻意规避的行为（例如通过调试器读取 pi 进程内存、用后台进程在毫秒级窗口内改写临时快照，或用混淆方式改写 `~/.aws/config` 以影响 pi 自身与 AWS MCP 代理读取的配置）仍可能获取凭证。护栏的目标是让 **AI 正常产生的命令在漏判时也不会写入 AWS**，并让变更都经过人工确认。面向客户的生产环境请务必配合下面的 IAM 控制。
 
 ### 2. IAM 纵深防御（生产环境必做）
 
@@ -168,6 +201,7 @@ bash install.sh [选项]
   --node MODE         auto|private|system（默认: auto）
   --no-mcp            不安装 AWS MCP Server（节省约 220 MB）
   --no-skills         不预装 AWS 运维 skills 与规则文件
+  --all-models        /model 显示全部内置模型（默认只启用当前区域可用的模型）
   --no-bashrc         不修改 ~/.bashrc
 ```
 
@@ -188,7 +222,7 @@ bash install.sh [选项]
 |---|---|---|
 | `~/.local/bin/pi`、`pi-bedrock-doctor` | 包装器与自检脚本 | 删除（若安装前有同名文件则恢复） |
 | `~/.local/share/pi-bedrock/` | 私有 Node、pi、uv、Python、MCP proxy、env 配置、`settings.orig.json`（安装前的原值） | 删除 |
-| `~/.pi/agent/settings.json` | `defaultProvider` / `defaultModel` / `defaultThinkingLevel` / `shellCommandPrefix` / `selfUpdateCommand` | 恢复安装前的原值（安装后被用户改过的保留） |
+| `~/.pi/agent/settings.json` | `defaultProvider` / `defaultModel` / `defaultThinkingLevel` / `enabledModels` / `shellCommandPrefix` / `selfUpdateCommand` | 恢复安装前的原值（安装后被用户改过的保留） |
 | `~/.pi/agent/mcp.json` | `aws-mcp` 条目（不覆盖用户自建的同名条目） | 删除该条目 |
 | `~/.pi/agent/AGENTS.md` | 托管段落（段落外的用户内容不受影响） | 删除该段落 |
 | `~/.pi/agent/skills/aws-agent-toolkit/` | 官方 skills | 删除 |
@@ -219,6 +253,7 @@ bash ~/.local/share/pi-bedrock/uninstall.sh
 | `aws-mcp` 连接失败 | 运行 `pi mcp list` 查看错误；确认凭证有效、时钟准确（SigV4 要求误差 < 5 分钟） |
 | `pi -p` 在脚本中卡住 | stdin 不是终端时 pi 会读取 stdin，请加 `</dev/null` |
 | `$HOME` 空间不足 | CloudShell 上限 1 GB；可用 `--no-mcp` 节省约 220 MB，或清理 `~/.pi/agent/sessions` |
+| `/model` 选择后报 `The provided model identifier is invalid` | 该模型在当前 Bedrock 源区域不存在；重新运行 `install.sh` 刷新可用模型列表（默认只显示可用模型） |
 | 写操作总被拒绝 | 是否处于非交互模式或只读模式（`/aws-guard` 查看） |
 | 无法修改 `~/.local/share/pi-bedrock/lib` 或护栏文件 | 这些文件安装为只读；如需调整请修改源码后重新运行 `install.sh` |
 | skills 提示"内容校验失败" | 上游内容与固定哈希不一致，已跳过安装（不影响其他功能）；审阅后可设置 `PI_AWS_SKILLS_SHA256` 重新安装 |
@@ -230,8 +265,10 @@ bash ~/.local/share/pi-bedrock/uninstall.sh
 ```bash
 npm install              # 仅安装测试框架 bats
 npm run lint             # shellcheck
-npm test                 # 70 个 bats 单元测试 + 36 个护栏测试（含三轮安全审查发现的全部绕过样例；无 AWS 调用）
+npm test                 # 82 个 bats + 40 个护栏 + 3 个模型筛选单元测试（含历次安全审查发现的全部绕过样例；无 AWS 调用）
 npm run test:e2e         # 在本机模拟 CloudShell 的端到端测试（会产生少量真实 Bedrock / AWS 只读调用）
+# 在 Linux 上模拟 macOS 用户环境（bash 3.2、无 GNU sha256sum/timeout、profile 凭证、zsh）：
+# BASH32=<bash 3.2 可执行文件> bash tests/e2e/macos-like.sh    （bash 3.2 可从 docker 镜像 bash:3.2 获取）
 ```
 
 端到端测试模拟了 CloudShell 的关键特征：独立 `$HOME`、`AWS_EXECUTION_ENV=CloudShell`、`AWS_REGION=ap-northeast-1`、仅通过 localhost 容器凭证端点提供凭证（禁用 IMDS）、PATH 中只有低于 22.19 的 Node。覆盖：安装 → Bedrock 对话 → bash 工具区域还原与凭证剥离 → 简单只读 aws 命令自动带凭证 → AWS MCP 只读调用 → 写操作护栏（非交互拒绝 / RPC 交互拒绝）→ doctor → 幂等重装 → 卸载。

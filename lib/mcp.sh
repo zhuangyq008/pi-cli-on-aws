@@ -14,16 +14,26 @@ _uv_sha256() {
   case "$PI_UV_VERSION:$1" in
     0.13.7:x86_64-unknown-linux-gnu) printf 'c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83' ;;
     0.13.7:aarch64-unknown-linux-gnu) printf '71279f8d3c67241e807b9d8db872d1bf541579fb9f08b7d1eb1682196d1e57dc' ;;
+    0.13.7:x86_64-apple-darwin) printf '20c47e4c1f630b8abaff8c291fa9b9aa300fef92c4fbff95adf198b55287cda7' ;;
+    0.13.7:aarch64-apple-darwin) printf '81b811b57e4624df7ed3aac148e0359100d9962f3d9dce00aec533dc2e086731' ;;
     *) return 1 ;;
   esac
 }
 
+# uv 发行包的 target triple：Linux x86_64 / arm64、macOS Intel / Apple Silicon
 _uv_target() {
+  local cpu os
   case "$(uname -m)" in
-    x86_64 | amd64) printf 'x86_64-unknown-linux-gnu' ;;
-    aarch64 | arm64) printf 'aarch64-unknown-linux-gnu' ;;
+    x86_64 | amd64) cpu=x86_64 ;;
+    aarch64 | arm64) cpu=aarch64 ;;
     *) return 1 ;;
   esac
+  case "$(os_name)" in
+    linux) os=unknown-linux-gnu ;;
+    darwin) os=apple-darwin ;;
+    *) return 1 ;;
+  esac
+  printf '%s-%s' "$cpu" "$os"
 }
 
 uv_dir() { printf '%s/uv' "$PI_BEDROCK_HOME"; }
@@ -39,7 +49,7 @@ _uv() {
 ensure_uv() {
   local dir target sha tmp file
   dir="$(uv_dir)"
-  if [ -x "$dir/bin/uv" ] && "$dir/bin/uv" --version 2>/dev/null | grep -q " $PI_UV_VERSION\b"; then
+  if [ -x "$dir/bin/uv" ] && [ "$("$dir/bin/uv" --version 2>/dev/null | awk '{print $2}')" = "$PI_UV_VERSION" ]; then
     log_info "复用 uv $PI_UV_VERSION"
     return 0
   fi
@@ -50,8 +60,7 @@ ensure_uv() {
   log_info "下载 uv $PI_UV_VERSION"
   curl -fsSL --retry 3 --proto '=https' "$PI_UV_DOWNLOAD_BASE/$PI_UV_VERSION/$file" -o "$tmp/$file" ||
     { rm -rf "$tmp"; die "下载 uv 失败"; }
-  printf '%s  %s\n' "$sha" "$file" >"$tmp/SHA256"
-  (cd "$tmp" && sha256sum -c --status SHA256) || { rm -rf "$tmp"; die "uv 发行包 SHA256 校验失败，已中止"; }
+  verify_sha256 "$tmp/$file" "$sha" || { rm -rf "$tmp"; die "uv 发行包 SHA256 校验失败，已中止"; }
   mkdir -p "$dir/bin"
   tar -xzf "$tmp/$file" -C "$dir/bin" --strip-components=1 "uv-$target/uv"
   rm -rf "$tmp"
@@ -69,7 +78,7 @@ install_mcp_proxy() {
   lock="$(_proxy_lock_file)"
   [ -f "$lock" ] || die "缺少依赖锁文件 $lock"
   PI_AWS_MCP_PROXY_BIN="$venv/bin/$PI_MCP_PROXY_PKG"
-  stamp="$(sha256sum "$lock" | awk '{print $1}')"
+  stamp="$(sha256_of "$lock")"
   if [ -x "$PI_AWS_MCP_PROXY_BIN" ] && [ "$(cat "$venv/.pi-bedrock-lock" 2>/dev/null)" = "$stamp" ]; then
     log_info "$PI_MCP_PROXY_PKG $PI_MCP_PROXY_VERSION 已安装，跳过"
     return 0

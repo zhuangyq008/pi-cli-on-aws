@@ -12,8 +12,10 @@ import {
   assessBashCommand,
   decideBash,
   withoutAwsCredentials,
+  awsConfigIssues,
+  sanitizeAwsConfig,
 } from "../../extensions/aws-ops-guard/classify.ts";
-import { mkdtempSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -288,7 +290,8 @@ test("run_script: Athena 只读 SQL 视为读，含写入语句或动态 SQL 视
 // ---------------- 凭证默认剥离 + 严格白名单（对抗性审查后的安全模型） ----------------
 const assess = (cmd: string) => assessBashCommand(cmd, { readFile: noFile, cwd: "/home/u/work", home: "/home/u" });
 const AWS_PATH = "/usr/local/bin/aws";
-const decide = (cmd: string) => decideBash(assess(cmd), { awsPath: AWS_PATH });
+const SNAPSHOT = { node: process.execPath, script: new URL("../../extensions/aws-ops-guard/snapshot.mjs", import.meta.url).pathname };
+const decide = (cmd: string) => decideBash(assess(cmd), { awsPath: AWS_PATH, snapshot: SNAPSHOT });
 
 test("严格白名单：常见只读 aws CLI 自动带凭证执行", () => {
   for (const cmd of [
@@ -351,7 +354,7 @@ test("对抗性审查绕过样例：都不会在无人确认时带凭证执行",
     `aws redshift-data execute-statement --sql "SELECT * INTO newt FROM t"`,
   ]) {
     const a = assessBashCommand(cmd, opts);
-    assert.notEqual(decideBash(a, { awsPath: AWS_PATH }).action, "run-with-credentials", cmd);
+    assert.notEqual(decideBash(a, { awsPath: AWS_PATH, snapshot: SNAPSHOT }).action, "run-with-credentials", cmd);
   }
   // 对审查中可见的 AWS 写操作，确认框中会给出具体操作
   assert.ok(analyzeBashCommand("for v in a b; do aws ec2 delete-vpc --vpc-id $v; done", opts).includes("ec2 delete-vpc"));
@@ -468,7 +471,7 @@ test("自动路径误报控制：s3 ls、2>&1、单引号中的 JMESPath 反引�
 function fakeAws(): string {
   const dir = mkdtempSync(join(tmpdir(), "guard-aws-"));
   const path = join(dir, "aws");
-  writeFileSync(path, '#!/bin/bash\necho "AWS_ARGS=$*"\necho "AWS_TOKEN=${AWS_CONTAINER_AUTHORIZATION_TOKEN:-none}"\necho "AWS_CONFIG=${AWS_CONFIG_FILE:-unset}"\n');
+  writeFileSync(path, '#!/bin/bash\necho "AWS_ARGS=$*"\necho "AWS_TOKEN=${AWS_CONTAINER_AUTHORIZATION_TOKEN:-none}"\necho "AWS_CONFIG=${AWS_CONFIG_FILE:-unset}"\necho "AWS_HOME=$HOME"\necho "CONFIG_TEXT=$(tr \"\\n\" \" \" < \"$AWS_CONFIG_FILE\" 2>/dev/null)"\n');
   chmodSync(path, 0o755);
   return path;
 }
@@ -476,15 +479,25 @@ const credEnv = { PATH: process.env.PATH ?? "/usr/bin:/bin", AWS_CONTAINER_AUTHO
 
 test("重建命令：只有 aws 进程拿到凭证，参数按校验结果原样传递", () => {
   const aws = fakeAws();
-  const decision = decideBash(assess("aws ec2 describe-instances --query 'Reservations[*].Instances[*].[InstanceId]' --output text"), { awsPath: aws });
+  // 用户 HOME 中的 ~/.aws/config 被篡改：aws 进程读到的应是白名单重写后的快照
+  const userHome = mkdtempSync(join(tmpdir(), "guard-userhome-"));
+  mkdirSync(join(userHome, ".aws"));
+  writeFileSync(join(userHome, ".aws", "config"), "[default]\nregion = ap-northeast-1\ncredential_process: /bin/id\n");
+  const decision = decideBash(assess("aws ec2 describe-instances --query 'Reservations[*].Instances[*].[InstanceId]' --output text"), { awsPath: aws, snapshot: SNAPSHOT });
   assert.equal(decision.action, "run-with-credentials");
   const command = (decision as { command: string }).command;
-  const out = execFileSync("bash", ["-c", command], { env: credEnv, encoding: "utf8" });
+  const out = execFileSync("bash", ["-c", command], { env: { ...credEnv, HOME: userHome }, encoding: "utf8" });
   assert.match(out, /AWS_ARGS=ec2 describe-instances --query Reservations\[\*\]\.Instances\[\*\]\.\[InstanceId\] --output text/);
   assert.match(out, /AWS_TOKEN=secret-token/);
-  assert.match(out, /AWS_CONFIG=\/dev\/null/);
+  // aws 进程读取执行时生成的白名单快照（不含 credential_process），执行后快照被删除
+  const snapshotHome = /AWS_HOME=(\S+)/.exec(out)?.[1] ?? "";
+  assert.match(snapshotHome, /pi-aws-home-/);
+  assert.match(out, /AWS_CONFIG=\S+\/\.aws\/config/);
+  assert.match(out, /CONFIG_TEXT=\[default\] region = ap-northeast-1/);
+  assert.ok(!out.includes("credential_process"), out);
+  assert.ok(!existsSync(snapshotHome), "快照目录应在命令结束时删除");
   // 过滤器运行在无凭证环境中
-  const filtered = decideBash(assess("aws sts get-caller-identity | grep -c secret"), { awsPath: aws }) as { command: string };
+  const filtered = decideBash(assess("aws sts get-caller-identity | grep -c secret"), { awsPath: aws, snapshot: SNAPSHOT }) as { command: string };
   // 用 env 替换过滤器，验证管道后的进程看不到凭证（env 不读 stdin，上游可能 SIGPIPE，因此不检查退出码）
   const viaFilter = spawnSync("bash", ["-c", filtered.command.replace(/'grep' '-c' 'secret'$/, "'env'")], { env: credEnv, encoding: "utf8" }).stdout;
   assert.match(viaFilter, /AWS_REGION=us-east-1/);
@@ -503,4 +516,56 @@ test("审计日志脱敏：访问密钥、密码 / 令牌参数", async () => {
   const out = redact(`aws iam create-access-key; export AWS_SECRET_ACCESS_KEY=abc123 AKIAABCDEFGHIJKLMNOP --master-user-password Hunter2 {"SecretString": "s3cr3t", "Token":"tok"} --secret-string xyz`);
   for (const leaked of ["abc123", "ABCDEFGHIJKLMNOP", "Hunter2", "s3cr3t", "tok\"", "xyz"]) assert.ok(!out.includes(leaked), `${leaked} in ${out}`);
   assert.equal(redact("aws ce get-cost-and-usage --granularity DAILY"), "aws ce get-cost-and-usage --granularity DAILY");
+});
+
+// ---------------- 推送门禁：~/.aws 配置篡改 ----------------
+const TRICKY_CONFIGS: Record<string, string> = {
+  colon: "[default]\ncredential_process: /bin/id\nregion = us-east-1\n",
+  cr: "[default]\rcredential_process=/bin/id\rregion=us-east-1\r",
+  nested: "[default]\nregion = us-east-1\ns3 =\n  endpoint_url = http://evil\n",
+  continuation: "[default]\nregion = us-east-1\n  credential_process = /bin/id\n",
+  services: "[services x]\nec2 =\n  endpoint_url = http://evil\n[profile p]\nservices = x\nsso_session = s\n",
+  imds: "[default]\nec2_metadata_service_endpoint = http://evil\nca_bundle = /tmp/ca.pem\ncli_pager = sh\n[plugins]\ncli_legacy_plugin_path = /tmp\n",
+};
+
+test("awsConfigIssues：识别各种写法的危险项（= 或 : 分隔、\\r 换行、嵌套）", () => {
+  assert.ok(awsConfigIssues(TRICKY_CONFIGS.colon).includes("credential_process"));
+  assert.ok(awsConfigIssues(TRICKY_CONFIGS.cr).includes("credential_process"));
+  assert.ok(awsConfigIssues(TRICKY_CONFIGS.nested).includes("endpoint_url"));
+  for (const k of ["ec2_metadata_service_endpoint", "ca_bundle", "cli_pager", "[plugins]"]) assert.ok(awsConfigIssues(TRICKY_CONFIGS.imds).includes(k), k);
+  assert.deepEqual(awsConfigIssues("[default]\nregion = ap-northeast-1\n[profile sso]\nsso_session = s\nrole_arn = arn:aws:iam::1:role/r"), []);
+});
+
+test("sanitizeAwsConfig：白名单重写后，Python configparser 解析结果不含任何危险项", () => {
+  for (const [name, text] of Object.entries(TRICKY_CONFIGS)) {
+    const sanitized = sanitizeAwsConfig(text, "config");
+    const parsed = execFileSync("python3", ["-I", "-c", "import configparser,sys,json\np=configparser.RawConfigParser()\np.read_string(sys.stdin.read())\nprint(json.dumps({s: dict(p.items(s)) for s in p.sections()}))"], { input: sanitized, encoding: "utf8" });
+    assert.ok(!/credential_process|endpoint_url|ca_bundle|cli_pager|ec2_metadata|plugins|services/.test(parsed), `${name}: ${parsed}`);
+  }
+  assert.equal(sanitizeAwsConfig("[default]\nregion = us-east-1\nregion = eu-west-1\n[profile p]\nrole_arn = arn:aws:iam::1:role/r\nsource_profile = default\n", "config"),
+    "[default]\nregion = us-east-1\n\n[profile p]\nrole_arn = arn:aws:iam::1:role/r\nsource_profile = default\n");
+  assert.equal(sanitizeAwsConfig("[default]\naws_access_key_id = AKIA\ncredential_process = x\n", "credentials"), "[default]\naws_access_key_id = AKIA\n");
+});
+
+test("批准带凭证执行时，确认框提示 ~/.aws 中的危险项", () => {
+  const decision = decideBash(assess("for r in a b; do aws sts get-caller-identity; done"), { awsPath: AWS_PATH, snapshot: SNAPSHOT, awsConfigWarnings: ["config: credential_process"] });
+  assert.equal(decision.action, "confirm");
+  assert.ok((decision as { reasons: string[] }).reasons.some((r) => r.includes("credential_process")));
+});
+
+test("通配符 / 变量拼出的隐藏目录路径需要确认（门禁发现的写法），普通通配符不受影响", () => {
+  for (const cmd of [
+    "printf '[default]\\ncredential_process=x' > ~/.a*/config",
+    "echo x >> ~/.[a]ws/config",
+    "cat /tmp/x > .a?s/config",
+    "d=$(printf '\\056aws'); echo x >> ~/$d/config",
+    "cp /tmp/evil ~/.{a,b}ws/config",
+    "chmod -R u+w ~/.p?/agent/extensions",
+    "rm -rf ~/.p*",
+  ]) {
+    assert.ok(assess(cmd).guardFindings.length > 0, cmd);
+  }
+  for (const cmd of ["ls *.json", "grep -r ERROR logs/*", "cat data/report-?.csv | head", "jq '.ResultsByTime[0].Groups | sort_by(.Metrics.UnblendedCost.Amount)' c.json", "jq '.[] | .a/2' x.json"]) {
+    assert.deepEqual(assess(cmd).guardFindings, [], cmd);
+  }
 });

@@ -96,6 +96,11 @@ check "aws-ops-guard 扩展已安装" test -f "$SIM_HOME/.pi/agent/extensions/aw
 SKILLS="$(find "$SIM_HOME/.pi/agent/skills" -name SKILL.md | wc -l)"
 check "预装 AWS 运维 skills（$SKILLS 个）" test "$SKILLS" -gt 10
 check "AGENTS.md 写入运维规则" grep -q '先查后改' "$SIM_HOME/.pi/agent/AGENTS.md"
+check "enabledModels 只包含当前区域可用模型（含默认模型）" node -e '
+  const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+  const m = s.enabledModels ?? [];
+  process.exit(m.length > 0 && m.length < 150 && m[0] === "amazon-bedrock/global.moonshotai.kimi-k3.1" ? 0 : 1);
+' "$SIM_HOME/.pi/agent/settings.json"
 CHOSEN="$(sed -n 's/^PI_BEDROCK_REGION=//p' "$SIM_HOME/.local/share/pi-bedrock/env")"
 echo "  选定 Bedrock 源区域: ${CHOSEN:-跟随 AWS_REGION}"
 echo "  安装占用: $(du -sh "$SIM_HOME/.local/share/pi-bedrock" | cut -f1)，\$HOME 总计 $(du -sh "$SIM_HOME" | cut -f1)"

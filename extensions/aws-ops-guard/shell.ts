@@ -238,6 +238,10 @@ function assessCommandWord(cmd: string, args: readonly string[], whole: string, 
   return merge([{ guardFindings: guard, awsLabels: aws, autoApprove: false }, nested]);
 }
 
+// 用通配符或变量拼出的隐藏目录路径（~/.a*/config、~/$d/config）可能指向受保护位置，文本检查无法覆盖
+// （只匹配路径中的隐藏目录：其后还有 "/"，或其前是 "/"；不误伤以 "." 开头的 jq 程序）
+const HIDDEN_PATH_PATTERN = /(^|\/)\.[^/\s]*[*?[{][^/\s]*\/|\/\.[^/\s]*[*?[{][^/\s]*$|^(~|\$HOME|\$\{HOME\})\/.*[$*?[{]/;
+
 function assessSegment(words: readonly string[], whole: string, options: ShellOptions): BashAssessment {
   // 任意位置出现的 aws（find -exec aws、for ... do aws ...、/usr/bin/env aws ...）都视为 AWS 调用
   const aws: string[] = [];
@@ -250,7 +254,8 @@ function assessSegment(words: readonly string[], whole: string, options: ShellOp
   const start = commandStart(words);
   const cmd = words[start];
   const command = cmd === undefined ? EMPTY : assessCommandWord(cmd, words.slice(start + 1), whole, options);
-  return merge([{ guardFindings: [], awsLabels: aws, autoApprove: false }, command]);
+  const hidden = words.some((w) => HIDDEN_PATH_PATTERN.test(w)) ? ["用通配符或变量访问隐藏目录（可能指向受保护位置）"] : [];
+  return merge([{ guardFindings: hidden, awsLabels: aws, autoApprove: false }, command]);
 }
 
 export function assessBashCommand(command: string, options: ShellOptions = {}): BashAssessment {

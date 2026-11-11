@@ -207,3 +207,19 @@ ENV
   remove_rc_block "$HOME/.bashrc"
   [ "$(cat "$HOME/.bashrc")" = $'line1\nline2' ]
 }
+
+@test "merge_settings: 写入 enabledModels（仅当前区域可用模型），卸载时恢复原值" {
+  mkdir -p "$PI_CODING_AGENT_DIR"
+  printf '{"enabledModels":["anthropic/claude-x"]}\n' >"$SETTINGS"
+  merge_settings node "$REPO_ROOT/lib" "$SETTINGS" amazon-bedrock global.moonshotai.kimi-k3.1 medium /npm "$NPM_PREFIX" "$ORIG" '["amazon-bedrock/global.moonshotai.kimi-k3.1","amazon-bedrock/apac.amazon.nova-pro-v1:0"]'
+  [ "$(jq_get enabledModels)" = '["amazon-bedrock/global.moonshotai.kimi-k3.1","amazon-bedrock/apac.amazon.nova-pro-v1:0"]' ]
+  unapply
+  [ "$(jq_get enabledModels)" = '["anthropic/claude-x"]' ]
+}
+
+@test "merge_settings: 拒绝非法的 enabledModels" {
+  run merge_settings node "$REPO_ROOT/lib" "$SETTINGS" amazon-bedrock m medium /npm "$NPM_PREFIX" "$ORIG" '["evil; rm -rf ~"]'
+  [ "$status" -eq 64 ]
+  run merge_settings node "$REPO_ROOT/lib" "$SETTINGS" amazon-bedrock m medium /npm "$NPM_PREFIX" "$ORIG" '[]'
+  [ "$status" -eq 64 ]
+}

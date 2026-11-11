@@ -15,7 +15,7 @@ import { accessSync, appendFileSync, constants, existsSync, mkdirSync, readFileS
 import { homedir } from "node:os";
 import { dirname, join, posix } from "node:path";
 import {
-  analyzePresignedUrl, analyzeRunScript, assessBashCommand, classifyMcpTool, decideBash,
+  analyzePresignedUrl, analyzeRunScript, assessBashCommand, awsConfigIssues, classifyMcpTool, decideBash,
   isCredentialPath, isProtectedPath, withoutAwsCredentials,
 } from "./classify.ts";
 import { redact } from "./redact.ts";
@@ -49,20 +49,58 @@ const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(home, ".pi", "agent");
 const auditFile = join(agentDir, "aws-ops-guard.log");
 const modeFile = join(agentDir, "aws-ops-guard.mode");
 
-// 自动带凭证执行时使用的 aws 绝对路径：只接受 $HOME、/tmp 之外的位置（防止被 agent 替换）
+function isWritable(path: string): boolean {
+  try {
+    accessSync(path, constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// 路径本身及其所有上级目录都不可被当前用户改写（任一上级可写都能替换路径中的某一级）
+function immutablePath(path: string): boolean {
+  let current = path;
+  for (let i = 0; i < 64; i += 1) {
+    if (isWritable(current)) return false;
+    const parent = dirname(current);
+    if (parent === current) return true;
+    current = parent;
+  }
+  return false;
+}
+
+// 自动带凭证执行时使用的 aws 绝对路径：只接受当前用户无法改写的位置（PATH 中的路径、符号链接目标
+// 及其所有上级目录都不可写）。例如 Apple Silicon 上 Homebrew 的 /opt/homebrew/bin/aws 归当前用户所有，
+// agent 可替换它以窃取凭证，因此不被信任——此时 bash 中的 aws 命令一律需要人工确认。
 function resolveAwsPath(): string | undefined {
   for (const dir of (process.env.PATH ?? "").split(":")) {
     if (!dir.startsWith("/") || dir.startsWith(home) || dir.startsWith("/tmp")) continue;
     const candidate = join(dir, "aws");
     try {
       accessSync(candidate, constants.X_OK);
-      return candidate;
+      if (immutablePath(candidate) && immutablePath(realpathSync(candidate))) return candidate;
     } catch {
       // 继续查找下一个 PATH 目录
     }
   }
   return undefined;
 }
+
+const awsConfigPaths = (): ReadonlyArray<readonly [string, string]> => [
+  ["config", process.env.AWS_CONFIG_FILE ?? join(home, ".aws", "config")],
+  ["credentials", process.env.AWS_SHARED_CREDENTIALS_FILE ?? join(home, ".aws", "credentials")],
+];
+
+function currentAwsConfigIssues(): string[] {
+  return awsConfigPaths().flatMap(([name, path]) => {
+    const text = readSmallFile(path);
+    return text === undefined ? [] : awsConfigIssues(text).map((issue) => `${name}: ${issue}`);
+  });
+}
+
+// 自动执行时在命令中调用：生成 ~/.aws 白名单快照（node 使用 pi 自身的绝对路径，脚本位于只读的护栏目录）
+const snapshotRunner = { node: process.execPath, script: join(agentDir, "extensions", "aws-ops-guard", "snapshot.mjs") };
 const awsPath = resolveAwsPath();
 
 function parseMode(value: string | undefined): GuardMode | undefined {
@@ -118,7 +156,11 @@ function realpathOf(absPath: string): string | undefined {
 const PASS: Omit<Inspection, "preview"> = { reasons: [], grantCredentials: false, stripCredentials: false };
 
 function inspectBash(command: string, cwd: string): Inspection {
-  const decision = decideBash(assessBashCommand(command, { readFile: readSmallFile, realpath: realpathOf, cwd, home }), { awsPath });
+  const assessment = assessBashCommand(command, { readFile: readSmallFile, realpath: realpathOf, cwd, home });
+  const needsAws = assessment.awsLabels.length > 0 || assessment.strict !== undefined;
+  const awsConfigWarnings = needsAws ? currentAwsConfigIssues() : [];
+  const snapshot = existsSync(snapshotRunner.script) ? snapshotRunner : undefined;
+  const decision = decideBash(assessment, { awsPath, snapshot, awsConfigWarnings });
   if (decision.action === "run-with-credentials") return { ...PASS, preview: command, rewrite: decision.command };
   if (decision.action === "run-without-credentials") return { ...PASS, preview: command, stripCredentials: true };
   return { reasons: decision.reasons, preview: command, grantCredentials: decision.grantCredentials, stripCredentials: !decision.grantCredentials };

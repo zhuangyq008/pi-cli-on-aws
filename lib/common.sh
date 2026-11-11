@@ -56,6 +56,74 @@ node_arch() {
 
 is_cloudshell() { [ "${AWS_EXECUTION_ENV:-}" = "CloudShell" ]; }
 
+# 输出 Node / uv 发行包使用的系统名：linux | darwin
+os_name() {
+  case "${1:-$(uname -s)}" in
+    Linux) printf 'linux' ;;
+    Darwin) printf 'darwin' ;;
+    *) return 1 ;;
+  esac
+}
+
+# 需要写入 PATH 的 shell 启动文件：始终包含 ~/.bashrc；macOS 或 zsh 用户加 ~/.zshrc；
+# macOS 上若已存在 ~/.bash_profile 也写入（登录 shell 不会自动读取 ~/.bashrc）
+rc_files() {
+  printf '%s\n' "$HOME/.bashrc"
+  if [ "$(os_name)" = darwin ] || [[ "${SHELL:-}" == */zsh ]]; then printf '%s\n' "$HOME/.zshrc"; fi
+  if [ "$(os_name)" = darwin ] && [ -f "$HOME/.bash_profile" ]; then printf '%s\n' "$HOME/.bash_profile"; fi
+}
+
+# ---- 可移植工具（Linux GNU / macOS BSD / busybox）--------------------------
+# sha256_of FILE（或 - 表示 stdin）：输出十六进制摘要
+sha256_of() {
+  local f="${1:--}"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$f" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$f" | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    if [ "$f" = - ]; then openssl dgst -sha256 -r; else openssl dgst -sha256 -r "$f"; fi | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+have_sha256() { printf '' | sha256_of - >/dev/null 2>&1; }
+
+# verify_sha256 FILE EXPECTED
+verify_sha256() {
+  local digest
+  digest="$(sha256_of "$1")" || return 1
+  [ -n "$2" ] && [ -n "$digest" ] && [ "$digest" = "$2" ]
+}
+
+# run_timeout SECONDS CMD...：超时返回 124（无 timeout 命令时用 gtimeout 或 perl alarm）
+run_timeout() {
+  local secs="$1" rc=0
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$secs" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$secs" "$@"
+  else
+    # exec { $ARGV[0] } @ARGV：即使只有一个参数也不经过 shell 解释
+    perl -e 'alarm shift @ARGV; exec { $ARGV[0] } @ARGV or exit 127' "$secs" "$@" || rc=$?
+    [ "$rc" -eq 142 ] && return 124
+    return "$rc"
+  fi
+}
+
+# resolve_path PATH：解析符号链接后的绝对路径（macOS 旧版 readlink 不支持 -f）
+resolve_path() {
+  if readlink -f / >/dev/null 2>&1; then
+    readlink -f "$1"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -MCwd -e 'print Cwd::abs_path(shift)' "$1"
+  else
+    python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]), end="")' "$1"
+  fi
+}
+
 # ---- 输入校验 --------------------------------------------------------------
 is_valid_region() { [[ "${1:-}" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]$ ]]; }
 

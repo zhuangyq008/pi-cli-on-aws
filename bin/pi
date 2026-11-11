@@ -14,6 +14,8 @@ fi
 # shellcheck source=../lib/config.sh
 . "$PI_BEDROCK_HOME/lib/config.sh"
 load_env_file "$PI_BEDROCK_HOME/env"
+apply_default_region
+apply_aws_profile_hint
 apply_bedrock_region
 
 : "${PI_BEDROCK_NODE_BIN:?pi-bedrock: env 文件缺少 PI_BEDROCK_NODE_BIN，请重新运行 install.sh}"

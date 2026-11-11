@@ -3,7 +3,7 @@
 # 注意：bin/pi 包装器只 source 本文件（不依赖 common.sh），保持启动开销最小。
 
 # env 文件允许的键（白名单）。env 文件按 KEY=VALUE 逐行解析，绝不 source/eval。
-PI_BEDROCK_ENV_KEYS="PI_BEDROCK_REGION PI_BEDROCK_MODEL PI_BEDROCK_NODE_BIN PI_BEDROCK_PI_BIN PI_AWS_MCP_PROXY_BIN PI_BIN_DIR PI_CODING_AGENT_DIR"
+PI_BEDROCK_ENV_KEYS="PI_BEDROCK_REGION PI_BEDROCK_MODEL PI_BEDROCK_NODE_BIN PI_BEDROCK_PI_BIN PI_AWS_MCP_PROXY_BIN PI_BIN_DIR PI_CODING_AGENT_DIR PI_DEFAULT_AWS_REGION"
 PI_BEDROCK_PREFIX_TAG="pi-bedrock:restore-shell-region"
 PI_BEDROCK_MARKER_BEGIN="# >>> pi-bedrock >>>"
 PI_BEDROCK_MARKER_END="# <<< pi-bedrock <<<"
@@ -69,6 +69,28 @@ capture_ops_region() {
   return 0
 }
 
+# 未设置 AWS_REGION 时（如 macOS 本地），使用安装时从 `aws configure get region` 记录的默认区域
+apply_default_region() {
+  if [ -z "${AWS_REGION:-}" ] && [ -z "${AWS_DEFAULT_REGION:-}" ] && _is_region "${PI_DEFAULT_AWS_REGION:-}"; then
+    export AWS_REGION="$PI_DEFAULT_AWS_REGION" AWS_DEFAULT_REGION="$PI_DEFAULT_AWS_REGION"
+  fi
+  return 0
+}
+
+# pi 只在检测到 AWS 凭证相关环境变量时才启用 amazon-bedrock。macOS 等本地环境常用 ~/.aws 中的
+# default profile 而不设置任何变量，此时显式设置 AWS_PROFILE=default（CloudShell 有容器凭证变量，不受影响）
+apply_aws_profile_hint() {
+  local v
+  for v in AWS_PROFILE AWS_ACCESS_KEY_ID AWS_BEARER_TOKEN_BEDROCK AWS_CONTAINER_CREDENTIALS_FULL_URI \
+    AWS_CONTAINER_CREDENTIALS_RELATIVE_URI AWS_WEB_IDENTITY_TOKEN_FILE; do
+    [ -n "${!v:-}" ] && return 0
+  done
+  if grep -qs '^\[\(profile \)\{0,1\}default\]' "${AWS_CONFIG_FILE:-$HOME/.aws/config}" "${AWS_SHARED_CREDENTIALS_FILE:-$HOME/.aws/credentials}"; then
+    export AWS_PROFILE=default
+  fi
+  return 0
+}
+
 # 若设置了 PI_BEDROCK_REGION，则仅对 pi 进程把 AWS_REGION 指向 Bedrock 区域，
 # 并把原区域保存在 PI_SHELL_AWS_REGION，供 shellCommandPrefix 在 agent 的 bash 工具中还原。
 apply_bedrock_region() {
@@ -92,12 +114,14 @@ shell_prefix_snippet() {
   printf 'if [ -n "${PI_SHELL_AWS_REGION:-}" ]; then export AWS_REGION="$PI_SHELL_AWS_REGION" AWS_DEFAULT_REGION="$PI_SHELL_AWS_REGION"; fi # %s' "$PI_BEDROCK_PREFIX_TAG"
 }
 
-# merge_settings NODE SCRIPT_DIR SETTINGS_FILE PROVIDER MODEL THINKING NPM_BIN NPM_PREFIX ORIG_FILE
+# merge_settings NODE SCRIPT_DIR SETTINGS_FILE PROVIDER MODEL THINKING NPM_BIN NPM_PREFIX ORIG_FILE [ENABLED_MODELS_JSON]
 merge_settings() {
+  local -a extra=()
+  [ -n "${10:-}" ] && extra=(--enabled-models "${10}")
   PI_BEDROCK_PREFIX_SNIPPET="$(shell_prefix_snippet)" \
     PI_BEDROCK_PREFIX_TAG="$PI_BEDROCK_PREFIX_TAG" \
     "$1" "$2/merge-settings.mjs" apply "$3" \
-    --provider "$4" --model "$5" --thinking "$6" --npm "$7" --npm-prefix "$8" --orig "$9"
+    --provider "$4" --model "$5" --thinking "$6" --npm "$7" --npm-prefix "$8" --orig "$9" ${extra[@]+"${extra[@]}"}
 }
 
 # unmerge_settings NODE SCRIPT_DIR SETTINGS_FILE PROVIDER MODEL NPM_PREFIX ORIG_FILE

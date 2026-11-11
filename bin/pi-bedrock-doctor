@@ -19,7 +19,9 @@ load_env_file "$PI_BEDROCK_HOME/env"
 . "$PI_BEDROCK_HOME/lib/mcp-runtime.sh"
 # shellcheck source=../lib/skills.sh
 . "$PI_BEDROCK_HOME/lib/skills.sh"
-WRAPPER="$(dirname "$(readlink -f "$0")")/pi"
+WRAPPER="$(dirname "$(resolve_path "$0")")/pi"
+apply_default_region
+apply_aws_profile_hint
 
 QUICK=0
 case "${1:-}" in
@@ -63,6 +65,9 @@ check_settings() {
     process.stdout.write(`${s.defaultProvider ?? "-"}/${s.defaultModel ?? "-"}/${s.defaultThinkingLevel ?? "-"}`);
   ' "$file" 2>/dev/null)" || { bad "无法读取 $file"; return; }
   if [ "${got%/*}" = "$PI_BEDROCK_PROVIDER/$PI_BEDROCK_MODEL" ]; then ok "默认模型 ${got%/*}（thinking: ${got##*/}）"; else warn "默认模型已被修改为 ${got%/*}（安装时为 $PI_BEDROCK_PROVIDER/$PI_BEDROCK_MODEL）"; fi
+  local enabled
+  enabled="$("$PI_BEDROCK_NODE_BIN/node" -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.stdout.write(String((s.enabledModels??[]).length))' "$file" 2>/dev/null || echo 0)"
+  if [ "$enabled" -gt 0 ]; then ok "/model 默认显示 $enabled 个当前区域可用的模型（Tab 切换查看全部）"; else warn "未设置 enabledModels：/model 会显示全部内置模型，其中部分在当前区域不可用（重新运行 install.sh 可筛选）"; fi
 }
 
 effective_region() { printf '%s' "${PI_BEDROCK_REGION:-${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}}"; }
@@ -73,6 +78,7 @@ check_aws() {
   local src="默认凭证链" arn
   [ -n "${AWS_CONTAINER_CREDENTIALS_FULL_URI:-}" ] && src="容器凭证端点（CloudShell 控制台身份）"
   [ -n "${AWS_ACCESS_KEY_ID:-}" ] && src="环境变量 AWS_ACCESS_KEY_ID"
+  [ -z "${AWS_CONTAINER_CREDENTIALS_FULL_URI:-}${AWS_ACCESS_KEY_ID:-}${AWS_PROFILE:-}" ] && warn "未检测到 AWS 凭证相关环境变量：pi 可能不会启用 amazon-bedrock（请设置 AWS_PROFILE 或运行 aws login / aws sso login）"
   [ -n "${AWS_PROFILE:-}" ] && src="profile ${AWS_PROFILE}"
   if arn="$(aws sts get-caller-identity --query Arn --output text 2>/dev/null)"; then ok "身份 $arn（来源: $src）"; else bad "无法获取 AWS 身份（来源: $src）"; return; fi
   local region
@@ -119,7 +125,7 @@ check_ops() {
     bad "$PI_CODING_AGENT_DIR/mcp.json 中没有本工具的 aws-mcp 条目"
   fi
   [ "$QUICK" = 1 ] && return
-  if out="$(cd "$HOME" && timeout 180 "$WRAPPER" mcp list </dev/null 2>&1)" && grep -q "aws-mcp: connected" <<<"$out"; then
+  if out="$(cd "$HOME" && run_timeout 180 "$WRAPPER" mcp list </dev/null 2>&1)" && grep -q "aws-mcp: connected" <<<"$out"; then
     ok "$(grep -o 'aws-mcp: connected, [0-9]* tools' <<<"$out")"
   else
     bad "AWS MCP Server 连接失败: $(grep -A2 'aws-mcp' <<<"$out" | head -n 3 | tr '\n' ' ')"
@@ -143,7 +149,7 @@ check_e2e() {
   section "pi 端到端"
   local out rc=0 parsed provider stop text
   # 期望答案由模型拼接得到，prompt 中不出现完整字符串
-  out="$(cd "$HOME" && timeout 180 "$WRAPPER" -p --no-session --no-tools --mode json \
+  out="$(cd "$HOME" && run_timeout 180 "$WRAPPER" -p --no-session --no-tools --mode json \
     "Join the two words PI_BEDROCK and DOCTOR_OK with an underscore and reply with only the result." </dev/null 2>&1)" || rc=$?
   parsed="$(printf '%s' "$out" | "$PI_BEDROCK_NODE_BIN/node" -e "$LAST_ASSISTANT_JS" 2>/dev/null || true)"
   IFS=$'\t' read -r provider stop text <<<"$parsed"
