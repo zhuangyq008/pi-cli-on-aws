@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# pi-cli-bedrock-aws-mcp
+# AWS MCP Server 启动器：由 pi 按 ~/.pi/agent/mcp.json 以 stdio 方式拉起。
+#   - 通过 mcp-proxy-for-aws-cli 用当前 AWS 凭证（CloudShell 控制台身份）做 SigV4 签名
+#   - 默认操作区域 = PI_OPS_AWS_REGION（CloudShell 当前区域），不受 Bedrock 源区域切换影响
+#   - 可选环境变量：PI_OPS_AWS_REGION、PI_AWS_MCP_ENDPOINT_REGION、AWS_PROFILE
+set -euo pipefail
+
+PI_BEDROCK_HOME="${PI_BEDROCK_HOME:-__PI_BEDROCK_HOME__}"
+# shellcheck source=../lib/config.sh
+. "$PI_BEDROCK_HOME/lib/config.sh"
+# shellcheck source=../lib/mcp-runtime.sh
+. "$PI_BEDROCK_HOME/lib/mcp-runtime.sh"
+load_env_file "$PI_BEDROCK_HOME/env"
+
+: "${PI_AWS_MCP_PROXY_BIN:?pi-bedrock: env 文件缺少 PI_AWS_MCP_PROXY_BIN，请重新运行 install.sh}"
+ops_region="${PI_OPS_AWS_REGION:-${PI_SHELL_AWS_REGION:-${AWS_REGION:-us-east-1}}}"
+_is_region "$ops_region" || { echo "pi-bedrock: 非法的运维区域 $ops_region" >&2; exit 64; }
+endpoint_region="${PI_AWS_MCP_ENDPOINT_REGION:-$(aws_mcp_endpoint_region "$ops_region")}"
+_is_region "$endpoint_region" || { echo "pi-bedrock: 非法的 PI_AWS_MCP_ENDPOINT_REGION=$endpoint_region" >&2; exit 64; }
+
+# proxy 内部的 boto3 使用运维区域；SigV4 签名区域显式设为 endpoint 区域
+export AWS_REGION="$ops_region" AWS_DEFAULT_REGION="$ops_region"
+exec "$PI_AWS_MCP_PROXY_BIN" "https://aws-mcp.${endpoint_region}.api.aws/mcp" \
+  --region "$endpoint_region" \
+  --metadata "AWS_REGION=$ops_region" \
+  "$@"

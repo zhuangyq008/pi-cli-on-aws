@@ -1,0 +1,285 @@
+#!/usr/bin/env bash
+# pi-cli-bedrock 安装器：在 AWS CloudShell 上安装 pi coding agent（默认 Amazon Bedrock + Kimi K3.1），
+# 并集成 AWS MCP Server、运维 skills 与 AWS 写操作护栏，用于云上运维（成本 / 可观测 / 告警）。
+# 幂等、非交互；所有文件位于 $HOME（CloudShell 重启后保留）。用法见 --help。
+set -euo pipefail
+umask 077   # 新建的配置、日志、凭证相关文件仅当前用户可读
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 记录用户覆盖的版本 / 完整性 / 下载地址（加载默认值之前），安装时醒目提示
+SECURITY_OVERRIDES=()
+for _v in PI_VERSION PI_PACKAGE PI_PACKAGE_INTEGRITY PI_NODE_VERSION PI_NODE_SHA256 PI_NODE_DIST_BASE PI_UV_VERSION PI_UV_DOWNLOAD_BASE \
+  PI_AWS_TOOLKIT_REPO PI_AWS_TOOLKIT_REF PI_AWS_TOOLKIT_TARBALL_URL PI_AWS_SKILLS PI_AWS_SKILLS_SHA256; do
+  [ -n "${!_v:-}" ] && SECURITY_OVERRIDES+=("$_v=${!_v}")
+done
+unset _v
+for _lib in common config node pi region mcp mcp-runtime skills; do
+  [ -f "$SCRIPT_DIR/lib/$_lib.sh" ] || { echo "ERROR: 缺少 $SCRIPT_DIR/lib/$_lib.sh，请使用完整的 pi-cli-bedrock 目录运行" >&2; exit 1; }
+  # shellcheck source=/dev/null
+  . "$SCRIPT_DIR/lib/$_lib.sh"
+done
+unset _lib
+# shellcheck disable=SC2034 # 供 lib/mcp.sh 使用（依赖锁文件位置）
+PI_BEDROCK_LIB_SRC="$SCRIPT_DIR/lib"
+INSTALL_MARKER=".pi-bedrock-managed"
+GUARD_FILES="index classify policy shell strict awscli script ops paths redact"
+
+MIN_FREE_MB_BASE=350   # Node + pi
+MIN_FREE_MB_MCP=600    # + uv、托管 Python、mcp-proxy-for-aws-cli
+OPT_REGION=""
+OPT_PROBE=1
+OPT_BASHRC=1
+OPT_MCP=1
+OPT_SKILLS=1
+
+usage() {
+  cat <<EOF
+用法: bash install.sh [选项]
+
+选项:
+  --region REGION     固定 Bedrock 源区域（默认: 自动探测，优先 CloudShell 当前区域）
+  --no-probe          不探测区域，pi 直接使用 AWS_REGION
+  --model ID          默认模型（默认: $PI_BEDROCK_MODEL）
+  --thinking LEVEL    默认思考等级 off|minimal|low|medium|high|xhigh|max（默认: $PI_BEDROCK_THINKING）
+  --pi-version VER    pi 版本（默认: $PI_VERSION，可设为 latest）
+  --node MODE         auto|private|system（默认: $PI_BEDROCK_NODE_MODE）
+  --no-mcp            不安装 AWS MCP Server（节省约 220 MB）
+  --no-skills         不预装 AWS 运维 skills 与规则文件
+  --no-bashrc         不修改 ~/.bashrc
+  -h, --help          显示帮助
+
+示例:
+  bash install.sh
+  bash install.sh --region ap-southeast-1 --thinking high
+EOF
+}
+
+parse_args() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --region) OPT_REGION="${2:?--region 需要参数}"; shift 2 ;;
+      --no-probe) OPT_PROBE=0; shift ;;
+      --model) PI_BEDROCK_MODEL="${2:?--model 需要参数}"; shift 2 ;;
+      --thinking) PI_BEDROCK_THINKING="${2:?--thinking 需要参数}"; shift 2 ;;
+      --pi-version) PI_VERSION="${2:?--pi-version 需要参数}"; shift 2 ;;
+      --node) PI_BEDROCK_NODE_MODE="${2:?--node 需要参数}"; shift 2 ;;
+      --no-bashrc) OPT_BASHRC=0; shift ;;
+      --no-mcp) OPT_MCP=0; shift ;;
+      --no-skills) OPT_SKILLS=0; shift ;;
+      -h | --help) usage; exit 0 ;;
+      *) usage >&2; die "未知参数: $1" ;;
+    esac
+  done
+}
+
+validate_inputs() {
+  [ -z "$OPT_REGION" ] || is_valid_region "$OPT_REGION" || die "非法区域: $OPT_REGION"
+  is_valid_model_id "$PI_BEDROCK_MODEL" || die "非法模型 ID: $PI_BEDROCK_MODEL"
+  is_valid_thinking "$PI_BEDROCK_THINKING" || die "非法思考等级: $PI_BEDROCK_THINKING"
+  is_valid_pi_version "$PI_VERSION" || die "非法 pi 版本: $PI_VERSION"
+  local p
+  for p in "$PI_BEDROCK_HOME" "$PI_BIN_DIR" "$PI_CODING_AGENT_DIR"; do
+    [[ "$p" =~ ^/[A-Za-z0-9._/@+-]+$ ]] || die "路径包含不支持的字符（仅允许字母数字 ._/@+-）: $p"
+  done
+}
+
+preflight() {
+  require_cmd curl tar awk sha256sum mktemp readlink
+  local avail need=0
+  avail="$(df -Pm "$HOME" | awk 'NR==2 {print $4}')"
+  [ -d "$PI_BEDROCK_HOME/npm-global" ] || need=$MIN_FREE_MB_BASE
+  [ "$OPT_MCP" = 1 ] && [ ! -d "$PI_BEDROCK_HOME/uv" ] && need=$((need + MIN_FREE_MB_MCP - MIN_FREE_MB_BASE))
+  if [ "${avail:-0}" -lt "$need" ]; then
+    die "\$HOME 剩余空间 ${avail} MB，不足 ${need} MB（CloudShell 上限 1 GB）。请清理后重试，或使用 --no-mcp"
+  fi
+  local o
+  for o in "${SECURITY_OVERRIDES[@]}"; do
+    log_warn "检测到覆盖固定版本 / 完整性校验的设置：$o（请确认来源可信）"
+  done
+  if is_cloudshell; then
+    log_info "检测到 AWS CloudShell（区域 ${AWS_REGION:-未知}，\$HOME 剩余 ${avail} MB）"
+  else
+    log_warn "未检测到 CloudShell（AWS_EXECUTION_ENV=${AWS_EXECUTION_ENV:-未设置}），继续按通用 Linux 安装"
+  fi
+}
+
+# 输出需要固定的 Bedrock 区域（空串表示跟随 AWS_REGION）
+resolve_bedrock_region() {
+  local current="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}" chosen rc=0
+  if [ -n "$OPT_REGION" ]; then
+    printf '%s' "$OPT_REGION"
+    return 0
+  fi
+  if [ "$OPT_PROBE" = 0 ]; then
+    log_info "跳过区域探测，pi 将使用 AWS_REGION=${current:-未设置}"
+    return 0
+  fi
+  if ! command -v aws >/dev/null 2>&1; then
+    log_warn "未找到 aws CLI，跳过区域探测"
+    return 0
+  fi
+  log_info "探测 Bedrock 源区域（模型 $PI_BEDROCK_MODEL，每次探测为一次 maxTokens=16 的极小调用）"
+  chosen="$(select_bedrock_region "$PI_BEDROCK_MODEL" "${current:-us-east-1}")" || rc=$?
+  case "$rc" in
+    0)
+      if [ "$chosen" = "$current" ]; then
+        log_info "当前区域 $current 可直接调用 $PI_BEDROCK_MODEL"
+      else
+        log_warn "当前区域 ${current:-未设置} 无法调用 $PI_BEDROCK_MODEL（多为 TPM 配额为 0），已将 pi 的 Bedrock 源区域固定为 $chosen"
+        log_warn "global.* 推理配置文件本身会跨全球商业区域路由，源区域只决定配额与 CloudWatch 指标归属"
+        printf '%s' "$chosen"
+      fi
+      ;;
+    3) log_warn "凭证或 IAM 权限不足，无法调用 Bedrock。安装将继续，请修复权限后运行 pi-bedrock-doctor" ;;
+    *) log_warn "所有候选区域均无法调用 $PI_BEDROCK_MODEL（配额为 0 或模型未开放）。安装将继续，请在 Service Quotas 申请提额后运行 pi-bedrock-doctor" ;;
+  esac
+}
+
+# 生成可执行脚本：替换 __PI_BEDROCK_HOME__ 占位符后原子写入
+_install_script() {
+  local src="$1" dest="$2" content
+  content="$(cat "$src")"
+  printf '%s\n' "${content//__PI_BEDROCK_HOME__/$PI_BEDROCK_HOME}" >"$dest.tmp"
+  chmod 755 "$dest.tmp"
+  mv -f "$dest.tmp" "$dest"
+}
+
+# 归属标记：最先写入，使中途失败的安装也能被 uninstall.sh 识别并清理
+mark_install_home() {
+  mkdir -p "$PI_BEDROCK_HOME"
+  printf 'pi-cli-bedrock\n' >"$PI_BEDROCK_HOME/$INSTALL_MARKER"
+}
+
+# 运行时文件设为只读（防止 agent 或误操作改写护栏 / 包装器；重新安装时先恢复可写）
+_writable() { [ -e "$1" ] && chmod -R u+w "$1" 2>/dev/null; return 0; }
+_readonly() { chmod -R a-w "$@" 2>/dev/null; return 0; }
+
+# AWS 写操作护栏扩展 → ~/.pi/agent/extensions/aws-ops-guard（pi 自动加载）
+install_guard_extension() {
+  local dest="$PI_CODING_AGENT_DIR/extensions/aws-ops-guard"
+  local backup="$PI_CODING_AGENT_DIR/.pi-bedrock-backup"
+  if [ -d "$dest" ] && [ ! -f "$dest/$INSTALL_MARKER" ]; then
+    # 备份到 extensions/ 之外，避免被 pi 当作扩展加载
+    mkdir -p "$backup"
+    mv -f "$dest" "$backup/aws-ops-guard.$(date +%Y%m%d%H%M%S)"
+    log_warn "已将原有 $dest 备份到 $backup/"
+  fi
+  _writable "$dest"
+  rm -rf "$dest"
+  mkdir -p "$dest"
+  local f
+  for f in $GUARD_FILES; do cp "$SCRIPT_DIR/extensions/aws-ops-guard/$f.ts" "$dest/"; done
+  printf 'pi-cli-bedrock\n' >"$dest/$INSTALL_MARKER"
+  chmod 0444 "$dest"/*.ts "$dest/$INSTALL_MARKER"
+  chmod 0555 "$dest"
+}
+
+# 复制运行时文件：lib → $PI_BEDROCK_HOME/lib，包装器与 doctor → $PI_BIN_DIR
+install_runtime_files() {
+  _writable "$PI_BEDROCK_HOME/lib"
+  _writable "$PI_BEDROCK_HOME/bin"
+  _writable "$PI_BEDROCK_HOME/uninstall.sh"
+  mkdir -p "$PI_BEDROCK_HOME/lib" "$PI_BEDROCK_HOME/bin" "$PI_BIN_DIR"
+  cp -f "$SCRIPT_DIR/lib/"{common,config,region,mcp-runtime,skills}.sh "$SCRIPT_DIR/lib/"{json-file,merge-settings,merge-mcp}.mjs "$PI_BEDROCK_HOME/lib/"
+  cp -f "$SCRIPT_DIR/uninstall.sh" "$PI_BEDROCK_HOME/uninstall.sh"
+  _install_script "$SCRIPT_DIR/bin/aws-mcp-proxy" "$PI_BEDROCK_HOME/bin/aws-mcp-proxy"
+  install_guard_extension
+  local f
+  for f in pi pi-bedrock-doctor; do
+    _writable "$PI_BIN_DIR/$f"
+    if [ -e "$PI_BIN_DIR/$f" ] && ! grep -q 'pi-cli-bedrock' "$PI_BIN_DIR/$f" 2>/dev/null; then
+      mv -f "$PI_BIN_DIR/$f" "$PI_BIN_DIR/$f.pre-pi-bedrock"
+      log_warn "已将原有 $PI_BIN_DIR/$f 备份为 $f.pre-pi-bedrock"
+    fi
+    _install_script "$SCRIPT_DIR/bin/$f" "$PI_BIN_DIR/$f"
+  done
+  chmod 0555 "$PI_BEDROCK_HOME/uninstall.sh" "$PI_BIN_DIR/pi" "$PI_BIN_DIR/pi-bedrock-doctor" "$PI_BEDROCK_HOME/bin/aws-mcp-proxy"
+  _readonly "$PI_BEDROCK_HOME/lib" "$PI_BEDROCK_HOME/bin"
+}
+
+write_configuration() {
+  local region="$1"
+  local -a entries=(
+    "PI_BEDROCK_MODEL=$PI_BEDROCK_MODEL"
+    "PI_BEDROCK_NODE_BIN=$PI_BEDROCK_NODE_BIN"
+    "PI_BEDROCK_PI_BIN=$PI_BEDROCK_PI_BIN"
+    "PI_BIN_DIR=$PI_BIN_DIR"
+    "PI_CODING_AGENT_DIR=$PI_CODING_AGENT_DIR"
+  )
+  [ -n "$region" ] && entries+=("PI_BEDROCK_REGION=$region")
+  [ "$OPT_MCP" = 1 ] && entries+=("PI_AWS_MCP_PROXY_BIN=$PI_AWS_MCP_PROXY_BIN")
+  write_env_file "$PI_BEDROCK_HOME/env" "${entries[@]}"
+  chmod 0400 "$PI_BEDROCK_HOME/env"
+  merge_settings "$PI_BEDROCK_NODE_BIN/node" "$PI_BEDROCK_HOME/lib" "$PI_CODING_AGENT_DIR/settings.json" \
+    "$PI_BEDROCK_PROVIDER" "$PI_BEDROCK_MODEL" "$PI_BEDROCK_THINKING" \
+    "$PI_BEDROCK_NODE_BIN/npm" "$PI_BEDROCK_NPM_PREFIX" "$PI_BEDROCK_HOME/settings.orig.json"
+  log_info "已更新 $PI_CODING_AGENT_DIR/settings.json（默认 $PI_BEDROCK_PROVIDER/$PI_BEDROCK_MODEL，thinking=$PI_BEDROCK_THINKING）"
+  local launcher="$PI_BEDROCK_HOME/bin/aws-mcp-proxy"
+  if [ "$OPT_MCP" = 1 ]; then
+    configure_mcp "$PI_BEDROCK_NODE_BIN/node" "$PI_BEDROCK_HOME/lib" "$PI_CODING_AGENT_DIR/mcp.json" "$launcher"
+  else
+    # 之前安装过 MCP、这次使用 --no-mcp：移除配置与代理，避免 pi 中出现连接失败的服务器
+    remove_mcp_config "$PI_BEDROCK_NODE_BIN/node" "$PI_BEDROCK_HOME/lib" "$PI_CODING_AGENT_DIR/mcp.json" "$launcher"
+    rm -rf "$(uv_dir)"
+  fi
+  if [ "$OPT_SKILLS" = 1 ]; then
+    install_aws_skills
+    install_agent_rules "$SCRIPT_DIR/templates/ops-rules.md"
+    log_info "已写入运维规则到 $PI_CODING_AGENT_DIR/AGENTS.md（托管段落）"
+  else
+    remove_aws_skills
+    remove_agent_rules
+  fi
+  if [ "$OPT_BASHRC" = 1 ]; then
+    write_rc_block "$HOME/.bashrc" "$PI_BIN_DIR"
+    log_info "已在 ~/.bashrc 中确保 $PI_BIN_DIR 在 PATH 中"
+  fi
+}
+
+smoke_test() {
+  local v
+  v="$("$PI_BIN_DIR/pi" --version 2>&1)" || die "pi 启动失败: $v"
+  log_info "pi --version: $v"
+}
+
+print_summary() {
+  local region="$1"
+  cat >&2 <<EOF
+
+$(printf '%s' "${_C_GRN}")安装完成$(printf '%s' "${_C_OFF}")
+  pi            $PI_BIN_DIR/pi  (pi $PI_VERSION)
+  默认模型      $PI_BEDROCK_PROVIDER / $PI_BEDROCK_MODEL
+  Bedrock 区域  ${region:-跟随 AWS_REGION（${AWS_REGION:-未设置}）}
+  AWS MCP       $([ "$OPT_MCP" = 1 ] && echo "aws-mcp（默认运维区域 = CloudShell 当前区域）" || echo "未安装")
+  运维 skills   $(if [ "$OPT_SKILLS" = 1 ]; then skills_dir; else echo "未安装"; fi)
+  写操作护栏    aws-ops-guard（写操作逐次人工确认；/aws-guard 查看或切换模式）
+  配置          $PI_BEDROCK_HOME/env, $PI_CODING_AGENT_DIR/{settings,mcp}.json
+
+下一步:
+  source ~/.bashrc          # 当前终端立即生效（新开的 CloudShell 标签页自动生效）
+  pi-bedrock-doctor         # 端到端自检
+  pi                        # 开始使用
+  卸载: bash $PI_BEDROCK_HOME/uninstall.sh
+EOF
+}
+
+main() {
+  parse_args "$@"
+  validate_inputs
+  preflight
+  mark_install_home
+  ensure_node
+  install_pi
+  if [ "$OPT_MCP" = 1 ]; then
+    ensure_uv
+    install_mcp_proxy
+  fi
+  local region
+  region="$(resolve_bedrock_region)"
+  install_runtime_files
+  write_configuration "$region"
+  smoke_test
+  print_summary "$region"
+}
+
+main "$@"

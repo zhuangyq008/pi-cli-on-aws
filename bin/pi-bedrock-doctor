@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# pi-cli-bedrock
+# pi-bedrock-doctor：诊断 pi + Bedrock 在 CloudShell 上的运行状态。
+#   pi-bedrock-doctor           完整检查（含一次极小的 Bedrock 调用与一次 pi 端到端调用）
+#   pi-bedrock-doctor --quick   只做本地检查，不产生模型调用
+set -uo pipefail
+
+PI_BEDROCK_HOME="${PI_BEDROCK_HOME:-__PI_BEDROCK_HOME__}"
+[ -f "$PI_BEDROCK_HOME/lib/config.sh" ] || { echo "未找到安装目录 $PI_BEDROCK_HOME，请先运行 install.sh" >&2; exit 1; }
+# 先加载 env 文件，再加载 common.sh 的默认值（保证 env 文件优先于默认值）
+# shellcheck source=../lib/config.sh
+. "$PI_BEDROCK_HOME/lib/config.sh"
+load_env_file "$PI_BEDROCK_HOME/env"
+# shellcheck source=../lib/common.sh
+. "$PI_BEDROCK_HOME/lib/common.sh"
+# shellcheck source=../lib/region.sh
+. "$PI_BEDROCK_HOME/lib/region.sh"
+# shellcheck source=../lib/mcp-runtime.sh
+. "$PI_BEDROCK_HOME/lib/mcp-runtime.sh"
+# shellcheck source=../lib/skills.sh
+. "$PI_BEDROCK_HOME/lib/skills.sh"
+WRAPPER="$(dirname "$(readlink -f "$0")")/pi"
+
+QUICK=0
+case "${1:-}" in
+  --quick) QUICK=1 ;;
+  -h | --help) sed -n '2,4p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  "") ;;
+  *) echo "未知参数: $1" >&2; exit 64 ;;
+esac
+
+FAILS=0
+ok() { printf '  [ OK ] %s\n' "$*"; }
+warn() { printf '  [WARN] %s\n' "$*"; }
+bad() { printf '  [FAIL] %s\n' "$*"; FAILS=$((FAILS + 1)); }
+section() { printf '\n%s\n' "$*"; }
+
+check_runtime() {
+  section "运行环境"
+  if is_cloudshell; then ok "AWS CloudShell（区域 ${AWS_REGION:-未知}）"; else warn "非 CloudShell 环境（AWS_EXECUTION_ENV=${AWS_EXECUTION_ENV:-未设置}），仍可使用"; fi
+  local used avail
+  used="$(du -sm "$PI_BEDROCK_HOME" 2>/dev/null | awk '{print $1}')"
+  avail="$(df -Pm "$HOME" | awk 'NR==2 {print $4}')"
+  if [ "${avail:-0}" -lt 100 ]; then warn "\$HOME 剩余 ${avail} MB（CloudShell 上限 1 GB），pi 会话文件可能写满磁盘"; else ok "安装占用 ${used} MB，\$HOME 剩余 ${avail} MB"; fi
+}
+
+check_binaries() {
+  section "Node.js / pi"
+  local node="${PI_BEDROCK_NODE_BIN:-}/node" v
+  if v="$("$node" -v 2>/dev/null)" && version_ge "$v" "$PI_MIN_NODE"; then ok "Node.js $v（$node）"; else bad "Node.js 不可用或版本 < $PI_MIN_NODE（$node）"; return; fi
+  if v="$("$node" "${PI_BEDROCK_PI_BIN:-}" --version 2>/dev/null)"; then ok "pi $v"; else bad "pi 无法启动（${PI_BEDROCK_PI_BIN:-未配置}）"; fi
+  local wrapper
+  wrapper="$(command -v pi 2>/dev/null || true)"
+  if [ -n "$wrapper" ] && grep -q pi-cli-bedrock-wrapper "$wrapper" 2>/dev/null; then ok "PATH 中的 pi 为本工具包装器（$wrapper）"; else warn "PATH 中的 pi 不是本工具包装器（${wrapper:-未找到}），请执行: source ~/.bashrc"; fi
+}
+
+check_settings() {
+  section "pi 配置（$PI_CODING_AGENT_DIR/settings.json）"
+  local file="$PI_CODING_AGENT_DIR/settings.json" got
+  # shellcheck disable=SC2016 # JS 模板字符串
+  got="$("$PI_BEDROCK_NODE_BIN/node" -e '
+    const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+    process.stdout.write(`${s.defaultProvider ?? "-"}/${s.defaultModel ?? "-"}/${s.defaultThinkingLevel ?? "-"}`);
+  ' "$file" 2>/dev/null)" || { bad "无法读取 $file"; return; }
+  if [ "${got%/*}" = "$PI_BEDROCK_PROVIDER/$PI_BEDROCK_MODEL" ]; then ok "默认模型 ${got%/*}（thinking: ${got##*/}）"; else warn "默认模型已被修改为 ${got%/*}（安装时为 $PI_BEDROCK_PROVIDER/$PI_BEDROCK_MODEL）"; fi
+}
+
+effective_region() { printf '%s' "${PI_BEDROCK_REGION:-${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}}"; }
+
+check_aws() {
+  section "AWS 凭证与 Bedrock"
+  command -v aws >/dev/null 2>&1 || { bad "未找到 aws CLI"; return; }
+  local src="默认凭证链" arn
+  [ -n "${AWS_CONTAINER_CREDENTIALS_FULL_URI:-}" ] && src="容器凭证端点（CloudShell 控制台身份）"
+  [ -n "${AWS_ACCESS_KEY_ID:-}" ] && src="环境变量 AWS_ACCESS_KEY_ID"
+  [ -n "${AWS_PROFILE:-}" ] && src="profile ${AWS_PROFILE}"
+  if arn="$(aws sts get-caller-identity --query Arn --output text 2>/dev/null)"; then ok "身份 $arn（来源: $src）"; else bad "无法获取 AWS 身份（来源: $src）"; return; fi
+  local region
+  region="$(effective_region)"
+  if [ -n "${PI_BEDROCK_REGION:-}" ] && [ "$PI_BEDROCK_REGION" != "${AWS_REGION:-}" ]; then
+    ok "Bedrock 源区域固定为 $region（shell 区域 ${AWS_REGION:-未设置} 保持不变）"
+  else
+    ok "Bedrock 源区域 $region（跟随 AWS_REGION）"
+  fi
+  [ "$QUICK" = 1 ] && return
+  local status
+  status="$(bedrock_probe "$region" "$PI_BEDROCK_MODEL")"
+  case "$status" in
+    ok) ok "Bedrock Converse 调用 $PI_BEDROCK_MODEL @ $region 成功" ;;
+    throttled) bad "ThrottlingException：$region 的 TPM 配额可能为 0。重新运行 install.sh 自动选择有配额的区域，或在 Service Quotas 申请提额" ;;
+    denied) bad "AccessDeniedException：需要 bedrock:InvokeModel / bedrock:InvokeModelWithResponseStream（首次使用第三方模型还需 aws-marketplace:Subscribe 等权限）" ;;
+    unavailable) bad "$region 不支持推理配置文件 $PI_BEDROCK_MODEL" ;;
+    *) bad "Bedrock 调用失败（$status），可设置 PI_BEDROCK_DEBUG=1 查看详情" ;;
+  esac
+}
+
+check_ops() {
+  section "运维集成（AWS MCP / skills / 写操作护栏）"
+  local guard="$PI_CODING_AGENT_DIR/extensions/aws-ops-guard/index.ts" count
+  local mode="${PI_AWS_OPS_GUARD:-$(cat "$PI_CODING_AGENT_DIR/aws-ops-guard.mode" 2>/dev/null || echo confirm)}"
+  if [ ! -f "$guard" ]; then
+    bad "未找到写操作护栏 $guard"
+  elif [ "$mode" = off ]; then
+    bad "aws-ops-guard 已被关闭（PI_AWS_OPS_GUARD=off），AWS 写操作不再需要确认"
+  elif [ "$mode" = readonly ]; then
+    warn "aws-ops-guard 处于只读模式，所有写操作都会被拒绝（/aws-guard confirm 切换）"
+  else
+    ok "aws-ops-guard 已启用（模式: confirm；审计日志 $PI_CODING_AGENT_DIR/aws-ops-guard.log）"
+  fi
+  count="$(find "$(skills_dir)" -name SKILL.md 2>/dev/null | wc -l | tr -d ' ')"
+  if [ "$count" -gt 0 ]; then ok "AWS 运维 skills: $count 个"; else warn "未预装 AWS skills（模型仍可通过 aws___retrieve_skill 在线获取）"; fi
+  if grep -qF "$AGENTS_MARKER_BEGIN" "$PI_CODING_AGENT_DIR/AGENTS.md" 2>/dev/null; then ok "运维规则已写入 AGENTS.md"; else warn "AGENTS.md 中没有运维规则段落"; fi
+  if [ -z "${PI_AWS_MCP_PROXY_BIN:-}" ]; then warn "未安装 AWS MCP Server（安装时使用了 --no-mcp）"; return; fi
+  local ops="${PI_OPS_AWS_REGION:-${AWS_REGION:-us-east-1}}" out
+  if [ -x "$PI_AWS_MCP_PROXY_BIN" ]; then ok "mcp-proxy-for-aws-cli 已安装"; else bad "未找到 $PI_AWS_MCP_PROXY_BIN"; fi
+  if grep -q "$PI_BEDROCK_HOME/bin/aws-mcp-proxy" "$PI_CODING_AGENT_DIR/mcp.json" 2>/dev/null; then
+    ok "mcp.json 已配置 aws-mcp（endpoint aws-mcp.$(aws_mcp_endpoint_region "$ops").api.aws，默认运维区域 $ops）"
+  else
+    bad "$PI_CODING_AGENT_DIR/mcp.json 中没有本工具的 aws-mcp 条目"
+  fi
+  [ "$QUICK" = 1 ] && return
+  if out="$(cd "$HOME" && timeout 180 "$WRAPPER" mcp list </dev/null 2>&1)" && grep -q "aws-mcp: connected" <<<"$out"; then
+    ok "$(grep -o 'aws-mcp: connected, [0-9]* tools' <<<"$out")"
+  else
+    bad "AWS MCP Server 连接失败: $(grep -A2 'aws-mcp' <<<"$out" | head -n 3 | tr '\n' ' ')"
+  fi
+}
+
+# 解析 pi --mode json 的事件流：取最后一条助手消息，输出 "provider<TAB>stopReason<TAB>文本"
+# （不能直接 grep 输出：事件流会回显用户 prompt，失败的助手消息也带 provider 字段）
+LAST_ASSISTANT_JS='
+let last;
+for (const line of require("fs").readFileSync(0, "utf8").split("\n")) {
+  try { const e = JSON.parse(line); if (e.type === "message_end" && e.message && e.message.role === "assistant") last = e.message; } catch {}
+}
+if (last) {
+  const text = (last.content || []).filter((c) => c.type === "text").map((c) => c.text).join("").replace(/\s+/g, " ");
+  process.stdout.write([last.provider, last.stopReason, text].join("\t"));
+}'
+
+check_e2e() {
+  [ "$QUICK" = 1 ] && return
+  section "pi 端到端"
+  local out rc=0 parsed provider stop text
+  # 期望答案由模型拼接得到，prompt 中不出现完整字符串
+  out="$(cd "$HOME" && timeout 180 "$WRAPPER" -p --no-session --no-tools --mode json \
+    "Join the two words PI_BEDROCK and DOCTOR_OK with an underscore and reply with only the result." </dev/null 2>&1)" || rc=$?
+  parsed="$(printf '%s' "$out" | "$PI_BEDROCK_NODE_BIN/node" -e "$LAST_ASSISTANT_JS" 2>/dev/null || true)"
+  IFS=$'\t' read -r provider stop text <<<"$parsed"
+  if [ "$rc" -eq 0 ] && [ "$provider" = "$PI_BEDROCK_PROVIDER" ] && [ "$stop" != error ] && [[ "$text" == *PI_BEDROCK_DOCTOR_OK* ]]; then
+    ok "pi -p 经 $PI_BEDROCK_PROVIDER / $PI_BEDROCK_MODEL 返回正确结果"
+  elif [ -n "$provider" ] && [ "$provider" != "$PI_BEDROCK_PROVIDER" ]; then
+    bad "pi 使用了 $provider 而不是 $PI_BEDROCK_PROVIDER（可能未检测到 AWS 凭证而回退到其他 provider）"
+  else
+    bad "pi -p 调用失败（exit=$rc, stopReason=${stop:-无}）: $(printf '%s' "${text:-$out}" | tail -c 300)"
+  fi
+}
+
+printf 'pi-bedrock-doctor（安装目录 %s）\n' "$PI_BEDROCK_HOME"
+check_runtime
+check_binaries
+check_settings
+check_aws
+check_ops
+check_e2e
+printf '\n'
+if [ "$FAILS" -gt 0 ]; then printf '发现 %d 项问题。\n' "$FAILS"; exit 1; fi
+printf '全部检查通过。\n'

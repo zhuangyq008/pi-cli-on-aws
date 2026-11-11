@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# pi-cli-bedrock-wrapper
+# pi 启动包装器（由 install.sh 安装到 ~/.local/bin/pi）：
+#   1. 从 env 文件读取私有 Node / pi 路径与 Bedrock 区域（白名单解析，不 source）
+#   2. 若配置了 PI_BEDROCK_REGION，仅对 pi 进程改写 AWS_REGION；agent 的 bash 工具中会还原原区域
+#   3. 用绝对路径的 node 启动 pi，避免 PATH 中的旧版 Node（如 nvm 默认版本）被 shebang 选中
+set -euo pipefail
+
+PI_BEDROCK_HOME="${PI_BEDROCK_HOME:-__PI_BEDROCK_HOME__}"
+if [ ! -f "$PI_BEDROCK_HOME/lib/config.sh" ]; then
+  echo "pi-bedrock: 未找到安装目录 $PI_BEDROCK_HOME，请重新运行 install.sh" >&2
+  exit 1
+fi
+# shellcheck source=../lib/config.sh
+. "$PI_BEDROCK_HOME/lib/config.sh"
+load_env_file "$PI_BEDROCK_HOME/env"
+apply_bedrock_region
+
+: "${PI_BEDROCK_NODE_BIN:?pi-bedrock: env 文件缺少 PI_BEDROCK_NODE_BIN，请重新运行 install.sh}"
+: "${PI_BEDROCK_PI_BIN:?pi-bedrock: env 文件缺少 PI_BEDROCK_PI_BIN，请重新运行 install.sh}"
+export PATH="$PI_BEDROCK_NODE_BIN:$PATH"
+exec "$PI_BEDROCK_NODE_BIN/node" "$PI_BEDROCK_PI_BIN" "$@"
