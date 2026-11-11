@@ -9,6 +9,8 @@
 
 适用场景：为客户提供 **成本与用量分析、CloudWatch 可观测、告警配置、故障排查、安全检查** 的智能运维助手。
 
+开发过程复盘与可复用的方法论（流程、踩坑清单、必做清单、AI 运维 Agent 安全设计原则）：[docs/development-methodology.md](docs/development-methodology.md)
+
 ---
 
 ## 快速开始
