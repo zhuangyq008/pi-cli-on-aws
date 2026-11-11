@@ -1,7 +1,7 @@
 // aws___run_script 代码分析（失败即拦截）：只有所有 AWS 调用都是"字面量操作名的直接 call_boto3 读调用"时才放行。
 // 不剥离注释、不解析字符串：注释/字符串里出现的写操作名会导致多一次确认（误报），但不会漏拦。
 import { classifyOperation, isReadOnlySql, SQL_PARAM_KEYS, SQL_QUERY_OPERATIONS, toPascal } from "./ops.ts";
-import { CREDENTIAL_TEXT, PROTECTED_TEXT } from "./paths.ts";
+import { credentialTextPattern, protectedTextPattern } from "./paths.ts";
 
 export interface ScriptAnalysis {
   readonly reads: readonly string[];
@@ -150,8 +150,10 @@ export function localScriptFindings(content: string, lang: "python" | "node" | "
     ? /child_process|\b(execSync|spawnSync|execFile)\b/
     : /subprocess|\bos\.(system|popen|exec\w*|spawn\w*|posix_spawn\w*)\b|\bpty\.spawn\b|\bpexpect\b|child_process/;
   if (subprocess.test(content)) findings.push(`${lang} 脚本启动子进程`);
-  if (PROTECTED_TEXT.test(content)) findings.push(`${lang} 脚本访问受保护位置`);
-  if (CREDENTIAL_TEXT.test(content)) findings.push(`${lang} 脚本访问 AWS 凭证`);
+  // 另检查去掉引号、反斜杠换成 / 的版本：Path.home() / ".aws" / "credentials"、"C:\\Users\\me\\.aws\\credentials"
+  const variants = [content, content.replace(/["'`]/g, "").replace(/\\+/g, "/")];
+  if (variants.some((v) => protectedTextPattern().test(v))) findings.push(`${lang} 脚本访问受保护位置`);
+  if (variants.some((v) => credentialTextPattern().test(v))) findings.push(`${lang} 脚本访问 AWS 凭证`);
   if (lang === "other") findings.push("执行无法识别的脚本");
   return findings;
 }

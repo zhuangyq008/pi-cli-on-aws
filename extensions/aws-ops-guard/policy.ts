@@ -18,6 +18,8 @@ export interface PolicyOptions {
   readonly snapshot?: { readonly node: string; readonly script: string };
   /** ~/.aws 配置中的危险项（credential_process / endpoint_url ...），在确认框中提示 */
   readonly awsConfigWarnings?: readonly string[];
+  /** Windows（Git Bash）：AWS CLI 的 ~ 取自 USERPROFILE 而非 HOME */
+  readonly windows?: boolean;
 }
 
 // 未获授权的 bash 命令执行前清除所有 AWS 凭证来源（环境变量、共享配置 / 凭证文件、IMDS）
@@ -43,13 +45,20 @@ function shellQuote(token: string): string {
 
 // 凭证先保存到未导出的 shell 数组，剥离后只通过 /usr/bin/env 传给 aws 进程（兼容 bash 3.2）。
 // aws 进程的 HOME 指向执行时生成的 ~/.aws 白名单快照（不读取真实 ~/.aws 的 alias / models / 未经重写的配置），结束后删除。
-export function buildStrictCommand(strict: StrictAwsCommand, awsPath: string, snapshot: { readonly node: string; readonly script: string }): string {
+// Windows 上 Python 的 expanduser 使用 USERPROFILE（忽略 HOME），sso / login 缓存目录同样需要指向快照。
+export function buildStrictCommand(
+  strict: StrictAwsCommand,
+  awsPath: string,
+  snapshot: { readonly node: string; readonly script: string },
+  windows = false,
+): string {
   const makeSnapshot = `__pi_awshome="$(${shellQuote(snapshot.node)} ${shellQuote(snapshot.script)})" || { echo "aws-ops-guard: 无法创建 ~/.aws 快照" >&2; exit 1; }`;
   const cleanup = `trap 'chmod -R u+w "$__pi_awshome" 2>/dev/null; rm -rf "$__pi_awshome"' EXIT`;
   const capture = `__pi_aws_env=(); for __pi_v in ${AWS_PROCESS_VARS.join(" ")}; do if [ -n "\${!__pi_v:-}" ]; then __pi_aws_env+=("$__pi_v=\${!__pi_v}"); fi; done`;
   const aws = [
     "/usr/bin/env", "-u", "AWS_EC2_METADATA_DISABLED", '"${__pi_aws_env[@]}"',
-    '"HOME=$__pi_awshome"', '"AWS_CONFIG_FILE=$__pi_awshome/.aws/config"', '"AWS_SHARED_CREDENTIALS_FILE=$__pi_awshome/.aws/credentials"',
+    '"HOME=$__pi_awshome"', ...(windows ? ['"USERPROFILE=$__pi_awshome"'] : []),
+    '"AWS_CONFIG_FILE=$__pi_awshome/.aws/config"', '"AWS_SHARED_CREDENTIALS_FILE=$__pi_awshome/.aws/credentials"',
     ...strict.assignments.map(shellQuote), shellQuote(awsPath), ...strict.awsArgs.map(shellQuote),
   ].join(" ") + (strict.mergeStderr ? " 2>&1" : "");
   const filters = strict.filters.map((stage) => stage.map(shellQuote).join(" "));
@@ -60,7 +69,7 @@ export function buildStrictCommand(strict: StrictAwsCommand, awsPath: string, sn
 export function decideBash(assessment: BashAssessment, options: PolicyOptions = {}): BashDecision {
   const needsAws = assessment.awsLabels.length > 0;
   if (assessment.guardFindings.length === 0 && assessment.strict && options.awsPath && options.snapshot) {
-    return { action: "run-with-credentials", command: buildStrictCommand(assessment.strict, options.awsPath, options.snapshot) };
+    return { action: "run-with-credentials", command: buildStrictCommand(assessment.strict, options.awsPath, options.snapshot, options.windows) };
   }
   if (assessment.guardFindings.length === 0 && !needsAws) return { action: "run-without-credentials" };
   const awsReasons = assessment.awsLabels.map((label) => `需要 AWS 凭证：${label}`);

@@ -16,6 +16,8 @@ main() {
   . "$script_dir/lib/common.sh"
   # shellcheck source=lib/skills.sh
   . "$script_dir/lib/skills.sh"
+  # Windows：与安装时写入配置的 C:/... 形式保持一致
+  if is_windows; then PI_BEDROCK_HOME="$(cygpath -m "$PI_BEDROCK_HOME")"; fi
 
   case "${1:-}" in
     -h | --help) sed -n '2,3p' "$0" | sed 's/^# \{0,1\}//'; return 0 ;;
@@ -44,8 +46,10 @@ revert_settings() {
     log_warn "未找到 node，跳过 settings.json 回滚"
     return 0
   fi
+  local -a extra=()
+  if is_windows && git_bash_path >/dev/null; then extra=(--shell-path "$(git_bash_path)"); fi
   unmerge_settings "$node" "$script_dir/lib" "$PI_CODING_AGENT_DIR/settings.json" \
-    "$PI_BEDROCK_PROVIDER" "$PI_BEDROCK_MODEL" "$PI_BEDROCK_HOME/npm-global" "$PI_BEDROCK_HOME/settings.orig.json" ||
+    "$PI_BEDROCK_PROVIDER" "$PI_BEDROCK_MODEL" "$PI_BEDROCK_HOME/npm-global" "$PI_BEDROCK_HOME/settings.orig.json" ${extra[@]+"${extra[@]}"} ||
     log_warn "settings.json 回滚失败，请手动检查"
   if [ -f "$PI_CODING_AGENT_DIR/mcp.json" ]; then
     "$node" "$script_dir/lib/merge-mcp.mjs" remove "$PI_CODING_AGENT_DIR/mcp.json" \
@@ -74,7 +78,10 @@ remove_ops_integrations() {
 
 remove_wrappers() {
   local f
-  for f in pi pi-bedrock-doctor; do
+  for f in pi.cmd pi-bedrock-doctor.cmd pi-bedrock-login.cmd; do
+    if [ -f "$PI_BIN_DIR/$f" ] && grep -q 'pi-cli-bedrock' "$PI_BIN_DIR/$f"; then rm -f "$PI_BIN_DIR/$f"; fi
+  done
+  for f in pi pi-bedrock-doctor pi-bedrock-login; do
     if [ -f "$PI_BIN_DIR/$f" ] && grep -q 'pi-cli-bedrock' "$PI_BIN_DIR/$f"; then
       chmod u+w "$PI_BIN_DIR/$f"
       rm -f "$PI_BIN_DIR/$f"
@@ -87,11 +94,18 @@ remove_wrappers() {
 }
 
 remove_home() {
-  local home_dir
+  local home_dir cmp base1 base2
   home_dir="$(resolve_path "$PI_BEDROCK_HOME" 2>/dev/null || true)"
+  cmp="$home_dir" base1="$HOME" base2="$(_path_entry "$_PI_BASE_HOME")"
+  # Windows：readlink -f 保留输入的 C:/... 形式而 $HOME 为 /c/...，统一转换后比较；路径不区分大小写
+  if is_windows; then
+    cmp="$(cygpath -u "$cmp" | tr '[:upper:]' '[:lower:]')"
+    base1="$(printf '%s' "$base1" | tr '[:upper:]' '[:lower:]')"
+    base2="$(printf '%s' "$base2" | tr '[:upper:]' '[:lower:]')"
+  fi
   # 防御：只删除位于 $HOME 下、且带有本工具归属标记的目录
-  case "$home_dir" in
-    "$HOME"/?*) ;;
+  case "$cmp" in
+    "$base1"/?* | "$base2"/?*) ;;
     *) log_warn "PI_BEDROCK_HOME=$PI_BEDROCK_HOME 不在 \$HOME 下，跳过删除"; return 0 ;;
   esac
   if [ -f "$home_dir/.pi-bedrock-managed" ]; then

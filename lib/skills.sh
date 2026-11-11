@@ -73,7 +73,7 @@ install_aws_skills() {
 
   tmp="$(mktemp -d)"
   log_info "下载 Agent Toolkit for AWS skills（$PI_AWS_TOOLKIT_REPO@${PI_AWS_TOOLKIT_REF:0:7}）"
-  if ! curl -fsSL --retry 3 --proto '=https' "$PI_AWS_TOOLKIT_TARBALL_URL" -o "$tmp/toolkit.tgz" ||
+  if ! download "$PI_AWS_TOOLKIT_TARBALL_URL" "$tmp/toolkit.tgz" ||
     ! _stage_skills "$tmp/toolkit.tgz" "$tmp/stage" "$tmp/rules.md"; then
     rm -rf "$tmp"
     log_warn "AWS skills 安装失败，已跳过（模型仍可通过 aws___retrieve_skill 在线获取 skills）"

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# pi-cli-bedrock 安装器：在 AWS CloudShell 上安装 pi coding agent（默认 Amazon Bedrock + Kimi K3.1），
-# 并集成 AWS MCP Server、运维 skills 与 AWS 写操作护栏，用于云上运维（成本 / 可观测 / 告警）。
-# 幂等、非交互；所有文件位于 ${HOME}（CloudShell 重启后保留）。用法见 --help。
+# pi-cli-bedrock 安装器：在 AWS CloudShell / macOS / Linux / Windows（Git Bash，由 install.ps1 调用）上安装
+# pi coding agent（默认 Amazon Bedrock + Kimi K3.1），并集成 AWS MCP Server、运维 skills 与 AWS 写操作护栏，
+# 用于云上运维（成本 / 可观测 / 告警）。幂等；所有文件位于 ${HOME}（CloudShell 重启后保留）。
+# 本地环境没有 AWS 凭证时引导配置（aws login / IAM Identity Center / Access Key / 已有 profile）。用法见 --help。
 set -euo pipefail
 umask 077   # 新建的配置、日志、凭证相关文件仅当前用户可读
 
@@ -13,7 +14,7 @@ for _v in PI_VERSION PI_PACKAGE PI_PACKAGE_INTEGRITY PI_NODE_VERSION PI_NODE_SHA
   [ -n "${!_v:-}" ] && SECURITY_OVERRIDES+=("$_v=${!_v}")
 done
 unset _v
-for _lib in common config node pi region mcp mcp-runtime skills models; do
+for _lib in common config node pi region mcp mcp-runtime skills models credentials; do
   [ -f "$SCRIPT_DIR/lib/$_lib.sh" ] || { echo "ERROR: 缺少 $SCRIPT_DIR/lib/$_lib.sh，请使用完整的 pi-cli-bedrock 目录运行" >&2; exit 1; }
   # shellcheck source=/dev/null
   . "$SCRIPT_DIR/lib/$_lib.sh"
@@ -82,13 +83,17 @@ validate_inputs() {
   is_valid_pi_version "$PI_VERSION" || die "非法 pi 版本: $PI_VERSION"
   local p
   for p in "$PI_BEDROCK_HOME" "$PI_BIN_DIR" "$PI_CODING_AGENT_DIR"; do
-    [[ "$p" =~ ^/[A-Za-z0-9._/@+-]+$ ]] || die "路径包含不支持的字符（仅允许字母数字 ._/@+-）: $p"
+    is_valid_install_path "$p" || die "路径包含不支持的字符（仅允许字母数字 ._/@+-）: ${p}。可设置 PI_BEDROCK_HOME / PI_BIN_DIR / PI_CODING_AGENT_DIR 指定其他目录"
   done
 }
 
 preflight() {
   require_cmd curl tar awk mktemp
-  os_name >/dev/null || die "不支持的操作系统: $(uname -s)（支持 Linux 与 macOS，x86_64 / arm64）"
+  os_name >/dev/null || die "不支持的操作系统: $(uname -s)（支持 Linux、macOS 与 Windows（Git Bash），x86_64 / arm64）"
+  if is_windows; then
+    require_cmd cygpath
+    git_bash_path >/dev/null || die "未找到 Git for Windows 的 bin/bash.exe，请使用 install.ps1 安装"
+  fi
   node_arch >/dev/null || die "不支持的 CPU 架构: $(uname -m)（支持 x86_64 / arm64）"
   have_sha256 || die "缺少 SHA256 工具（需要 sha256sum、shasum 或 openssl 之一）"
   local avail need=0
@@ -112,11 +117,11 @@ preflight() {
 
 # 非 CloudShell（如 macOS）通常不设置 AWS_REGION：从 AWS CLI 配置读取默认区域并记录到 env 文件
 detect_default_region() {
-  PI_DEFAULT_AWS_REGION=""
-  [ -n "${AWS_REGION:-}${AWS_DEFAULT_REGION:-}" ] && return 0
+  : "${PI_DEFAULT_AWS_REGION:=}"
+  [ -n "${AWS_REGION:-}${AWS_DEFAULT_REGION:-}${PI_DEFAULT_AWS_REGION}" ] && return 0
   command -v aws >/dev/null 2>&1 || return 0
   local r
-  r="$(AWS_PROFILE="${AWS_PROFILE:-default}" aws configure get region 2>/dev/null || true)"
+  r="$(AWS_PROFILE="${AWS_PROFILE:-default}" _strip_cr aws configure get region 2>/dev/null || true)"
   if is_valid_region "$r"; then
     PI_DEFAULT_AWS_REGION="$r"
     log_info "未设置 AWS_REGION，使用 AWS CLI 配置中的默认区域 $r"
@@ -196,18 +201,32 @@ install_guard_extension() {
   chmod 0555 "$dest"
 }
 
+# Windows：PowerShell / cmd 无法直接执行 bash 脚本，为每个命令生成 .cmd shim（经 Git Bash 运行同名 bash 脚本）
+install_windows_shims() {
+  is_windows || return 0
+  local bash_exe f
+  bash_exe="$(git_bash_path)" || die "未找到 Git Bash（bash.exe）"
+  for f in pi pi-bedrock-doctor pi-bedrock-login; do
+    _writable "$PI_BIN_DIR/$f.cmd"
+    printf '@echo off\r\nrem pi-cli-bedrock: %s\r\n"%s" "%s" %%*\r\nexit /b %%ERRORLEVEL%%\r\n' \
+      "$f" "$bash_exe" "$(native_path "$PI_BIN_DIR/$f")" >"$PI_BIN_DIR/$f.cmd.tmp"
+    mv -f "$PI_BIN_DIR/$f.cmd.tmp" "$PI_BIN_DIR/$f.cmd"
+  done
+}
+
 # 复制运行时文件：lib → $PI_BEDROCK_HOME/lib，包装器与 doctor → $PI_BIN_DIR
 install_runtime_files() {
   _writable "$PI_BEDROCK_HOME/lib"
   _writable "$PI_BEDROCK_HOME/bin"
   _writable "$PI_BEDROCK_HOME/uninstall.sh"
   mkdir -p "$PI_BEDROCK_HOME/lib" "$PI_BEDROCK_HOME/bin" "$PI_BIN_DIR"
-  cp -f "$SCRIPT_DIR/lib/"{common,config,region,mcp-runtime,skills}.sh "$SCRIPT_DIR/lib/"{json-file,merge-settings,merge-mcp}.mjs "$PI_BEDROCK_HOME/lib/"
+  cp -f "$SCRIPT_DIR/lib/"{common,config,region,mcp-runtime,skills,credentials}.sh "$SCRIPT_DIR/lib/"{json-file,merge-settings,merge-mcp}.mjs "$PI_BEDROCK_HOME/lib/"
   cp -f "$SCRIPT_DIR/uninstall.sh" "$PI_BEDROCK_HOME/uninstall.sh"
+  if is_windows; then _writable "$PI_BEDROCK_HOME/uninstall.ps1"; cp -f "$SCRIPT_DIR/uninstall.ps1" "$PI_BEDROCK_HOME/uninstall.ps1"; fi
   _install_script "$SCRIPT_DIR/bin/aws-mcp-proxy" "$PI_BEDROCK_HOME/bin/aws-mcp-proxy"
   install_guard_extension
   local f
-  for f in pi pi-bedrock-doctor; do
+  for f in pi pi-bedrock-doctor pi-bedrock-login; do
     _writable "$PI_BIN_DIR/$f"
     if [ -e "$PI_BIN_DIR/$f" ] && ! grep -q 'pi-cli-bedrock' "$PI_BIN_DIR/$f" 2>/dev/null; then
       mv -f "$PI_BIN_DIR/$f" "$PI_BIN_DIR/$f.pre-pi-bedrock"
@@ -215,7 +234,8 @@ install_runtime_files() {
     fi
     _install_script "$SCRIPT_DIR/bin/$f" "$PI_BIN_DIR/$f"
   done
-  chmod 0555 "$PI_BEDROCK_HOME/uninstall.sh" "$PI_BIN_DIR/pi" "$PI_BIN_DIR/pi-bedrock-doctor" "$PI_BEDROCK_HOME/bin/aws-mcp-proxy"
+  install_windows_shims
+  chmod 0555 "$PI_BEDROCK_HOME/uninstall.sh" "$PI_BIN_DIR/pi" "$PI_BIN_DIR/pi-bedrock-doctor" "$PI_BIN_DIR/pi-bedrock-login" "$PI_BEDROCK_HOME/bin/aws-mcp-proxy"
   _readonly "$PI_BEDROCK_HOME/lib" "$PI_BEDROCK_HOME/bin"
 }
 
@@ -231,11 +251,19 @@ write_configuration() {
   [ -n "$region" ] && entries+=("PI_BEDROCK_REGION=$region")
   [ "$OPT_MCP" = 1 ] && entries+=("PI_AWS_MCP_PROXY_BIN=$PI_AWS_MCP_PROXY_BIN")
   [ -n "${PI_DEFAULT_AWS_REGION:-}" ] && entries+=("PI_DEFAULT_AWS_REGION=$PI_DEFAULT_AWS_REGION")
+  [ -n "${PI_AWS_PROFILE:-}" ] && entries+=("PI_AWS_PROFILE=$PI_AWS_PROFILE")
   write_env_file "$PI_BEDROCK_HOME/env" "${entries[@]}"
   chmod 0400 "$PI_BEDROCK_HOME/env"
+  local npm="$PI_BEDROCK_NODE_BIN/npm"
+  local -a win_opts=()
+  if is_windows; then
+    # Windows：pi 的 bash 工具固定使用本次安装所用的 Git Bash；self-update 用 node.exe + npm-cli.js（npm.cmd 不能直接执行）
+    npm="$PI_BEDROCK_NODE_BIN/node.exe"
+    win_opts=(--shell-path "$(git_bash_path)" --npm-cli "$PI_BEDROCK_NODE_BIN/node_modules/npm/bin/npm-cli.js")
+  fi
   merge_settings "$PI_BEDROCK_NODE_BIN/node" "$PI_BEDROCK_HOME/lib" "$PI_CODING_AGENT_DIR/settings.json" \
     "$PI_BEDROCK_PROVIDER" "$PI_BEDROCK_MODEL" "$PI_BEDROCK_THINKING" \
-    "$PI_BEDROCK_NODE_BIN/npm" "$PI_BEDROCK_NPM_PREFIX" "$PI_BEDROCK_HOME/settings.orig.json" "${PI_ENABLED_MODELS_JSON:-}"
+    "$npm" "$PI_BEDROCK_NPM_PREFIX" "$PI_BEDROCK_HOME/settings.orig.json" "${PI_ENABLED_MODELS_JSON:-}" ${win_opts[@]+"${win_opts[@]}"}
   log_info "已更新 $PI_CODING_AGENT_DIR/settings.json（默认 $PI_BEDROCK_PROVIDER/${PI_BEDROCK_MODEL}，thinking=${PI_BEDROCK_THINKING}）"
   local launcher="$PI_BEDROCK_HOME/bin/aws-mcp-proxy"
   if [ "$OPT_MCP" = 1 ]; then
@@ -256,7 +284,7 @@ write_configuration() {
   if [ "$OPT_BASHRC" = 1 ]; then
     local rc
     while IFS= read -r rc; do
-      write_rc_block "$rc" "$PI_BIN_DIR"
+      write_rc_block "$rc" "$(_path_entry "$PI_BIN_DIR")"
       log_info "已在 ~${rc#"$HOME"} 中确保 $PI_BIN_DIR 在 PATH 中"
     done < <(rc_files)
   fi
@@ -269,9 +297,11 @@ smoke_test() {
 }
 
 print_summary() {
-  local region="$1" shell_rc ops_region
+  local region="$1" shell_rc ops_region activate
   shell_rc="$(rc_files | tail -n1)"
   shell_rc="~${shell_rc#"$HOME"}"
+  activate="source $shell_rc        # 当前终端立即生效（新开的终端标签页自动生效）"
+  is_windows && activate="重新打开 PowerShell / 终端窗口   # 使 PATH 生效（Git Bash 中也可 source ~/.bashrc）"
   ops_region="${AWS_REGION:-${AWS_DEFAULT_REGION:-${PI_DEFAULT_AWS_REGION:-us-east-1}}}"
   cat >&2 <<EOF
 
@@ -285,10 +315,11 @@ $(printf '%s' "${_C_GRN}")安装完成$(printf '%s' "${_C_OFF}")
   配置          $PI_BEDROCK_HOME/env, $PI_CODING_AGENT_DIR/{settings,mcp}.json
 
 下一步:
-  source $shell_rc        # 当前终端立即生效（新开的终端标签页自动生效）
+  $activate
   pi-bedrock-doctor         # 端到端自检
+  pi-bedrock-login          # 凭证过期时重新登录（--reconfigure 重新选择方式）
   pi                        # 开始使用
-  卸载: bash $PI_BEDROCK_HOME/uninstall.sh
+  卸载: $(if is_windows; then printf 'powershell -ExecutionPolicy Bypass -File %s/uninstall.ps1' "$PI_BEDROCK_HOME"; else printf 'bash %s/uninstall.sh' "$PI_BEDROCK_HOME"; fi)
 EOF
 }
 
@@ -297,6 +328,7 @@ main() {
   validate_inputs
   preflight
   mark_install_home
+  ensure_aws_credentials
   detect_default_region
   ensure_node
   install_pi

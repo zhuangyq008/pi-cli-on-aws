@@ -133,3 +133,9 @@ limited_path() {
   mkdir -p "$SANDBOX/opt/homebrew/bin"
   ! path_immutable "$SANDBOX/opt/homebrew/bin/node"
 }
+
+@test "extract_zip：目标目录不存在时自动创建" {
+  python3 -c 'import zipfile,sys; z=zipfile.ZipFile(sys.argv[1],"w"); z.writestr("uv.exe","x"); z.close()' "$SANDBOX/a.zip"
+  SYSTEMROOT= extract_zip "$SANDBOX/a.zip" "$SANDBOX/new/dir"
+  [ -f "$SANDBOX/new/dir/uv.exe" ]
+}

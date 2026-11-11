@@ -20,5 +20,13 @@ apply_bedrock_region
 
 : "${PI_BEDROCK_NODE_BIN:?pi-bedrock: env 文件缺少 PI_BEDROCK_NODE_BIN，请重新运行 install.sh}"
 : "${PI_BEDROCK_PI_BIN:?pi-bedrock: env 文件缺少 PI_BEDROCK_PI_BIN，请重新运行 install.sh}"
-export PATH="$PI_BEDROCK_NODE_BIN:$PATH"
+PATH="$(_path_entry "$PI_BEDROCK_NODE_BIN"):$PATH"
+export PATH
+case "$(uname -s)" in
+  MINGW* | MSYS*)
+    # Windows（Git Bash）：用户参数（如 "/model"）不做 MSYS 路径转换（只影响参数，环境变量照常转换）；
+    # agent 的 bash 工具中由 shellCommandPrefix 恢复转换
+    MSYS2_ARG_CONV_EXCL='*' exec "$PI_BEDROCK_NODE_BIN/node" "$PI_BEDROCK_PI_BIN" "$@"
+    ;;
+esac
 exec "$PI_BEDROCK_NODE_BIN/node" "$PI_BEDROCK_PI_BIN" "$@"

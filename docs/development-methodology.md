@@ -197,6 +197,27 @@
 | 14 | Unicode 规范化 | Python 把全角 `ｃall_boto3` 视为 `call_boto3` | 分析前做 NFKC 规范化 |
 | 15 | 1 GB `$HOME` | 缓存可能写满磁盘 | 临时缓存 + 预检剩余空间 + 精简安装 |
 
+**跨平台（macOS / Windows）新增的坑**——共同特点：在开发机上不会出现，只有在真实目标系统（或高保真模拟）上才会暴露：
+
+| # | 坑 | 现象 | 对策 |
+|---|---|---|---|
+| 16 | macOS bash 3.2：空数组 + `set -u` | `"${arr[@]}"` 报 unbound variable | `${arr[@]+"${arr[@]}"}`；用真实 bash 3.2 跑测试 |
+| 17 | macOS bash 3.2：`$VAR` 后紧跟中文 | 多字节首字节被并入变量名（`VAR?: unbound variable`） | 一律 `${VAR}`，并加静态检查测试 |
+| 18 | Windows PowerShell 5.1 读取无 BOM 的 .ps1 | 按 ANSI 代码页解码，中文字节变成引号，整个脚本语法错误 | .ps1 一律 UTF-8 with BOM，加测试守护 |
+| 19 | PowerShell 5.1 输出被重定向时 | 原生命令的 stderr 变成错误记录，`ErrorActionPreference=Stop` 下中断 | 调用原生命令时局部改为 Continue；交互时不要捕获输出（会失去 TTY） |
+| 20 | 7z 自解压包（PortableGit）在无桌面会话（SSM / 服务） | 直接退出码 1；系统自带 bsdtar 不支持 LZMA | 改用官方 Inno 安装包 `/VERYSILENT /CURRENTUSER`（无需管理员） |
+| 21 | Git Bash 的 MSYS 路径转换 | 参数和环境变量中的 `/tmp/x`、`/dev/null` 传给原生程序时被改写 | 安装路径统一用 `C:/...` 形式；用户参数用 `MSYS2_ARG_CONV_EXCL` 关闭转换 |
+| 22 | Git Bash 的 PATH 以 `:` 分隔 | `C:/x:$PATH` 被拆成 `C` 和 `/x` | PATH 条目转换为 `/c/x` |
+| 23 | 原生程序输出 CRLF | `$(aws configure get region)` 残留 `\r`，区域校验失败 | 统一经 `_strip_cr` 处理 |
+| 24 | Windows 上 Python 忽略 `HOME` | 把 aws 进程的 `HOME` 指向快照目录无效，仍读真实 `~/.aws` | 同时设置 `USERPROFILE` |
+| 25 | Windows 路径的多种写法 | `C:\`、`c:/`、`/c/`、`~\`、8.3 短名、`\\?\`、大小写，护栏按字符串比较会漏判 | 统一规范化后比较；用 `realpathSync.native` 展开短名 |
+| 26 | npm 全局目录布局、`ln -s` 行为不同 | Windows 上包在 `prefix/node_modules`；MSYS 的 `ln -s` 默认复制整个目录 | 按平台计算路径；Windows 不用符号链接 |
+| 27 | 测试环境的网络策略 | default 安全组出站被收紧；VPC 内 STS 接口终端节点只允许 default 安全组 | 测试实例同时加入专用安全组与 default 安全组；报错时显示底层原因而不是"验证失败" |
+| 28 | `import.meta.url === \`file://${argv[1]}\``判断是否直接运行 | Windows 上 argv[1] 是 `C:\...`，判断恒为假，脚本静默不执行、退出码 0 | 按文件名判断，并加静态检查禁止该写法 |
+| 29 | 路径的"形式"不统一 | Git Bash 中 `readlink -f` 保留输入的 `C:/...` 形式而 `$HOME` 为 `/c/...`，安全检查误判"不在 HOME 下" | 比较前统一转换（`cygpath -u`）并忽略大小写 |
+| 30 | schannel 的偶发错误 | `missing close_notify`（curl 错误 56），`--retry` 默认不重试 | Windows 上加 `--retry-all-errors`（内容由 SHA256 兜底） |
+| 31 | 用真实模型做护栏 E2E | 模型主动拒绝读取凭证、或按规则"先查后改"因缺权限停下，护栏根本没被触发 | 选模型会照做的受保护操作；断言"未泄漏"与"被拦截"分开；给测试身份补足只读权限 |
+
 ---
 
 ## 4. 必做清单（可直接复用）
@@ -214,6 +235,8 @@
 - [ ] 测试先行；纯函数（判断逻辑）与副作用（执行）分离
 - [ ] 小文件、单一职责；输入在边界处校验；不静默吞错误
 - [ ] E2E 还原环境关键差异；验证负向结果；断言使用非默认值
+- [ ] 每个目标平台至少一次真机（或临时云主机）端到端验证；模拟环境只能发现"已知的差异"
+- [ ] 测试的通过条件要求显式的成功标记（如 `FAILS=0`），不要只看进程或命令编排服务的状态
 
 **安全**
 - [ ] 默认无权限，能力按需授予；无法判断时拒绝（fail closed）

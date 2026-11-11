@@ -3,7 +3,7 @@
 # 注意：bin/pi 包装器只 source 本文件（不依赖 common.sh），保持启动开销最小。
 
 # env 文件允许的键（白名单）。env 文件按 KEY=VALUE 逐行解析，绝不 source/eval。
-PI_BEDROCK_ENV_KEYS="PI_BEDROCK_REGION PI_BEDROCK_MODEL PI_BEDROCK_NODE_BIN PI_BEDROCK_PI_BIN PI_AWS_MCP_PROXY_BIN PI_BIN_DIR PI_CODING_AGENT_DIR PI_DEFAULT_AWS_REGION"
+PI_BEDROCK_ENV_KEYS="PI_BEDROCK_REGION PI_BEDROCK_MODEL PI_BEDROCK_NODE_BIN PI_BEDROCK_PI_BIN PI_AWS_MCP_PROXY_BIN PI_BIN_DIR PI_CODING_AGENT_DIR PI_DEFAULT_AWS_REGION PI_AWS_PROFILE"
 PI_BEDROCK_PREFIX_TAG="pi-bedrock:restore-shell-region"
 PI_BEDROCK_MARKER_BEGIN="# >>> pi-bedrock >>>"
 PI_BEDROCK_MARKER_END="# <<< pi-bedrock <<<"
@@ -54,6 +54,14 @@ write_env_file() {
   mv -f "$tmp" "$file"
 }
 
+# _path_entry DIR：PATH 中的条目。Windows（Git Bash）上 PATH 以 ":" 分隔，C:/... 必须转换为 /c/... 形式
+_path_entry() {
+  case "$1" in
+    [A-Za-z]:/*) if command -v cygpath >/dev/null 2>&1; then cygpath -u "$1"; return 0; fi ;;
+  esac
+  printf '%s' "$1"
+}
+
 _is_region() { [[ "${1:-}" =~ ^[a-z]{2}(-gov)?-[a-z]+-[0-9]$ ]]; }
 
 # 记录"运维区域"（CloudShell 当前区域）到 PI_OPS_AWS_REGION，供 AWS MCP Server 作为默认操作区域。
@@ -77,6 +85,15 @@ apply_default_region() {
   return 0
 }
 
+# AWS CLI / SDK 使用的用户目录：Windows 上 Python / Node 版 SDK 读取 %USERPROFILE%\.aws（忽略 HOME），其他平台为 $HOME
+aws_user_home() {
+  if [ -n "${USERPROFILE:-}" ] && case "$(uname -s)" in MINGW* | MSYS*) true ;; *) false ;; esac; then
+    cygpath -u "$USERPROFILE"
+  else
+    printf '%s' "$HOME"
+  fi
+}
+
 # pi 只在检测到 AWS 凭证相关环境变量时才启用 amazon-bedrock。macOS 等本地环境常用 ~/.aws 中的
 # default profile 而不设置任何变量，此时显式设置 AWS_PROFILE=default（CloudShell 有容器凭证变量，不受影响）
 apply_aws_profile_hint() {
@@ -85,10 +102,33 @@ apply_aws_profile_hint() {
     AWS_CONTAINER_CREDENTIALS_RELATIVE_URI AWS_WEB_IDENTITY_TOKEN_FILE; do
     [ -n "${!v:-}" ] && return 0
   done
-  if grep -qs '^\[\(profile \)\{0,1\}default\]' "${AWS_CONFIG_FILE:-$HOME/.aws/config}" "${AWS_SHARED_CREDENTIALS_FILE:-$HOME/.aws/credentials}"; then
+  # 安装 / pi-bedrock-login 时配置的 profile 优先，其次是 ~/.aws 中的 default profile
+  local aws_home
+  aws_home="$(aws_user_home)"
+  if [ -n "${PI_AWS_PROFILE:-}" ]; then
+    export AWS_PROFILE="$PI_AWS_PROFILE"
+  elif grep -qs '^\[\(profile \)\{0,1\}default\]' "${AWS_CONFIG_FILE:-$aws_home/.aws/config}" "${AWS_SHARED_CREDENTIALS_FILE:-$aws_home/.aws/credentials}"; then
     export AWS_PROFILE=default
   fi
   return 0
+}
+
+# update_env_file FILE KEY=VALUE...：保留现有键，更新 / 新增指定键（原子写入，权限 0400）
+update_env_file() {
+  local file="$1" key line
+  shift
+  local -a entries=()
+  if [ -f "$file" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      [[ "$line" =~ ^([A-Z_][A-Z0-9_]*)= ]] || continue
+      key="${BASH_REMATCH[1]}"
+      case " ${*%%=*} " in *" $key "*) continue ;; esac
+      _env_key_allowed "$key" && entries+=("$line")
+    done <"$file"
+  fi
+  entries+=("$@")
+  write_env_file "$file" "${entries[@]}"
+  chmod 0400 "$file"
 }
 
 # 若设置了 PI_BEDROCK_REGION，则仅对 pi 进程把 AWS_REGION 指向 Bedrock 区域，
@@ -111,25 +151,27 @@ apply_bedrock_region() {
 shell_prefix_snippet() {
   # 单引号内的 $ 需原样写入 settings.json，由 agent 的 shell 在运行时展开
   # shellcheck disable=SC2016
-  printf 'if [ -n "${PI_SHELL_AWS_REGION:-}" ]; then export AWS_REGION="$PI_SHELL_AWS_REGION" AWS_DEFAULT_REGION="$PI_SHELL_AWS_REGION"; fi # %s' "$PI_BEDROCK_PREFIX_TAG"
+  # unset MSYS2_ARG_CONV_EXCL：Windows 包装器为 pi 关闭了参数路径转换，agent 的 bash 命令中需恢复（其他平台无影响）
+  printf 'unset MSYS2_ARG_CONV_EXCL MSYS_NO_PATHCONV; if [ -n "${PI_SHELL_AWS_REGION:-}" ]; then export AWS_REGION="$PI_SHELL_AWS_REGION" AWS_DEFAULT_REGION="$PI_SHELL_AWS_REGION"; fi # %s' "$PI_BEDROCK_PREFIX_TAG"
 }
 
-# merge_settings NODE SCRIPT_DIR SETTINGS_FILE PROVIDER MODEL THINKING NPM_BIN NPM_PREFIX ORIG_FILE [ENABLED_MODELS_JSON]
+# merge_settings NODE SCRIPT_DIR SETTINGS_FILE PROVIDER MODEL THINKING NPM_BIN NPM_PREFIX ORIG_FILE [ENABLED_MODELS_JSON] [--opt VALUE...]
 merge_settings() {
   local -a extra=()
   [ -n "${10:-}" ] && extra=(--enabled-models "${10}")
+  [ $# -gt 10 ] && extra+=("${@:11}")
   PI_BEDROCK_PREFIX_SNIPPET="$(shell_prefix_snippet)" \
     PI_BEDROCK_PREFIX_TAG="$PI_BEDROCK_PREFIX_TAG" \
     "$1" "$2/merge-settings.mjs" apply "$3" \
     --provider "$4" --model "$5" --thinking "$6" --npm "$7" --npm-prefix "$8" --orig "$9" ${extra[@]+"${extra[@]}"}
 }
 
-# unmerge_settings NODE SCRIPT_DIR SETTINGS_FILE PROVIDER MODEL NPM_PREFIX ORIG_FILE
+# unmerge_settings NODE SCRIPT_DIR SETTINGS_FILE PROVIDER MODEL NPM_PREFIX ORIG_FILE [--opt VALUE...]
 unmerge_settings() {
   [ -f "$3" ] || return 0
   PI_BEDROCK_PREFIX_TAG="$PI_BEDROCK_PREFIX_TAG" \
     "$1" "$2/merge-settings.mjs" remove "$3" \
-    --provider "$4" --model "$5" --npm-prefix "$6" --orig "$7"
+    --provider "$4" --model "$5" --npm-prefix "$6" --orig "$7" "${@:8}"
 }
 
 # ---- 托管段落（~/.bashrc、AGENTS.md 等）-----------------------------------

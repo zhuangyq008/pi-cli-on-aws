@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # 确保存在 Node.js >= PI_MIN_NODE。
 # CloudShell 只持久化 ${HOME}（1 GB），因此私有 Node 安装在 $PI_BEDROCK_HOME/node 下；
-# 结果写入全局变量 PI_BEDROCK_NODE_BIN（包含 node 与 npm 的目录）。
+# 结果写入全局变量 PI_BEDROCK_NODE_BIN（包含 node 与 npm 的目录；Windows 上为 node.exe 所在的发行包根目录）。
 
 # PI_BEDROCK_NODE_MODE: auto（系统 Node 满足版本则复用，否则安装私有 Node）| private | system
 : "${PI_BEDROCK_NODE_MODE:=auto}"
@@ -12,13 +12,26 @@ _system_node_ok() {
   version_ge "$("$node" -v 2>/dev/null)" "$PI_MIN_NODE"
 }
 
+# 私有 Node 的 bin 目录。Windows 上 MSYS 的 ln -s 默认会复制整个目录，因此不使用 current 符号链接
+private_node_bin() {
+  if is_windows; then
+    printf '%s/node/node-v%s-win-%s' "$PI_BEDROCK_HOME" "$PI_NODE_VERSION" "$(node_arch)"
+  else
+    printf '%s/node/current/bin' "$PI_BEDROCK_HOME"
+  fi
+}
+
 _private_node_ok() {
-  local node="$PI_BEDROCK_HOME/node/current/bin/node"
-  [ -x "$node" ] && [ "$("$node" -v 2>/dev/null)" = "v$PI_NODE_VERSION" ]
+  local node
+  node="$(private_node_bin)/node"
+  [ -x "$node" ] && [ "$("$node" -v 2>/dev/null | tr -d '\r')" = "v$PI_NODE_VERSION" ]
 }
 
 ensure_node() {
-  case "$PI_BEDROCK_NODE_MODE" in
+  # Windows：系统 Node 通常位于含空格的 Program Files 下，且无法可靠判断是否可被改写，auto 模式下始终使用私有 Node
+  local mode="$PI_BEDROCK_NODE_MODE"
+  [ "$mode" = auto ] && is_windows && mode=private
+  case "$mode" in
     auto | system)
       if _system_node_ok; then
         local sys_bin
@@ -40,7 +53,7 @@ ensure_node() {
   esac
 
   if _private_node_ok && [ "${PI_BEDROCK_FORCE_NODE:-0}" != 1 ]; then
-    PI_BEDROCK_NODE_BIN="$PI_BEDROCK_HOME/node/current/bin"
+    PI_BEDROCK_NODE_BIN="$(private_node_bin)"
     log_info "复用私有 Node.js $("$PI_BEDROCK_NODE_BIN/node" -v)"
     return 0
   fi
@@ -60,6 +73,8 @@ _node_sha256() {
     24.22.2:darwin-x64.tar.gz) printf 'd5e336d588c45be0c37dbd52cc29895593009ca4997a77a1fd02815131ed0e52' ;;
     24.22.2:darwin-arm64.tar.xz) printf '1f5ac075be50bed4780ea3be19a007fda95ea4d527d28d76d0b91de47d915115' ;;
     24.22.2:darwin-arm64.tar.gz) printf 'aa9549349e47dffaa42dcf95d6e06ade8c4bdafc980979883b88767670df385a' ;;
+    24.22.2:win-x64.zip) printf 'ca1bff5d8ead13c9f2ea404a176db46bd430704d5b5113734049fa365e7799e2' ;;
+    24.22.2:win-arm64.zip) printf 'f47968c213105077f64c6510f007632c0ca2574802a0b5067c327c49abe1c468' ;;
     *) if [ -n "${PI_NODE_SHA256:-}" ]; then printf '%s' "$PI_NODE_SHA256"; else return 1; fi ;;
   esac
 }
@@ -71,28 +86,36 @@ install_private_node() {
   arch="$(node_arch)" || die "不支持的 CPU 架构: $(uname -m)"
   [[ "$PI_NODE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "非法的 PI_NODE_VERSION: $PI_NODE_VERSION"
   dir="$PI_BEDROCK_HOME/node"
-  ext=gz
-  command -v xz >/dev/null 2>&1 && ext=xz
-  sha="$(_node_sha256 "$os-$arch.tar.$ext")" ||
-    die "未内置 Node.js $PI_NODE_VERSION ($os-$arch.tar.$ext) 的 SHA256，请设置 PI_NODE_SHA256 或使用默认版本"
+  if [ "$os" = windows ]; then
+    os=win ext=zip
+  else
+    ext=tar.gz
+    command -v xz >/dev/null 2>&1 && ext=tar.xz
+  fi
+  sha="$(_node_sha256 "$os-$arch.$ext")" ||
+    die "未内置 Node.js $PI_NODE_VERSION ($os-$arch.$ext) 的 SHA256，请设置 PI_NODE_SHA256 或使用默认版本"
   name="node-v$PI_NODE_VERSION-$os-$arch"
-  file="$name.tar.$ext"
+  file="$name.$ext"
 
   tmp="$(mktemp -d)"
   log_info "下载 $file"
-  curl -fsSL --retry 3 --proto '=https' "$PI_NODE_DIST_BASE/v$PI_NODE_VERSION/$file" -o "$tmp/$file" ||
+  download "$PI_NODE_DIST_BASE/v$PI_NODE_VERSION/$file" "$tmp/$file" ||
     { rm -rf "$tmp"; die "下载 Node.js 失败: $PI_NODE_DIST_BASE/v$PI_NODE_VERSION/$file"; }
   verify_sha256 "$tmp/$file" "$sha" || { rm -rf "$tmp"; die "Node.js 发行包 SHA256 校验失败，已中止"; }
 
   mkdir -p "$dir"
   rm -rf "${dir:?}/$name"
-  tar -xf "$tmp/$file" -C "$dir" --no-same-owner
+  if [ "$ext" = zip ]; then
+    extract_zip "$tmp/$file" "$dir" || { rm -rf "$tmp"; die "解压 $file 失败"; }
+  else
+    tar -xf "$tmp/$file" -C "$dir" --no-same-owner
+  fi
   rm -rf "$tmp"
   # 精简体积（CloudShell $HOME 仅 1 GB）：头文件与文档对运行 pi 无用
   rm -rf "${dir:?}/$name/include" "${dir:?}/$name/share" "${dir:?}/$name"/{CHANGELOG.md,README.md}
-  ln -sfn "$name" "$dir/current"
+  [ "$ext" = zip ] || ln -sfn "$name" "$dir/current"
   _prune_old_nodes "$dir" "$name"
-  PI_BEDROCK_NODE_BIN="$dir/current/bin"
+  PI_BEDROCK_NODE_BIN="$(private_node_bin)"
   log_info "Node.js $("$PI_BEDROCK_NODE_BIN/node" -v) 已安装到 $dir/$name"
 }
 

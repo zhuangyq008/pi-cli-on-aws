@@ -52,4 +52,5 @@ for (const [kind, path] of sources) {
 }
 copyTokenCache(join(home, ".aws", "sso", "cache"), join(awsDir, "sso", "cache"));
 copyTokenCache(join(home, ".aws", "login", "cache"), join(awsDir, "login", "cache"));
-process.stdout.write(dir);
+// Windows：输出 C:/... 形式，供 Git Bash 中的命令使用
+process.stdout.write(process.platform === "win32" ? dir.replace(/\\/g, "/") : dir);

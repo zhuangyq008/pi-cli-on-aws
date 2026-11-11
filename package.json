@@ -2,14 +2,15 @@
   "name": "pi-cli-bedrock",
   "version": "0.1.0",
   "private": true,
-  "description": "One-shot installer that runs pi coding agent on AWS CloudShell with Amazon Bedrock (Kimi K3.1) as the default model",
+  "description": "One-shot installer that runs pi coding agent with Amazon Bedrock (Kimi K3.1) on AWS CloudShell, macOS, Linux and Windows, with AWS MCP Server and an AWS ops guard",
   "scripts": {
-    "lint": "shellcheck -x install.sh uninstall.sh lib/*.sh bin/pi bin/pi-bedrock-doctor bin/aws-mcp-proxy $(ls tests/e2e/*.sh 2>/dev/null)",
-    "test": "bats tests && npm run -s test:guard && npm run -s test:models",
-    "test:e2e": "bash tests/e2e/cloudshell-sim.sh",
+    "lint": "shellcheck -x install.sh uninstall.sh lib/*.sh bin/pi bin/pi-bedrock-doctor bin/pi-bedrock-login bin/aws-mcp-proxy $(ls tests/e2e/*.sh tests/windows/*.sh 2>/dev/null)",
+    "test": "bats tests && npm run -s test:guard && npm run -s test:unit",
     "test:guard": "node --experimental-strip-types --no-warnings --test tests/guard/*.test.ts",
-    "test:models": "node --test tests/models.test.mjs",
-    "test:e2e:macos": "bash tests/e2e/macos-like.sh"
+    "test:unit": "node --test tests/models.test.mjs tests/merge.test.mjs",
+    "test:e2e": "bash tests/e2e/cloudshell-sim.sh",
+    "test:e2e:macos": "bash tests/e2e/macos-like.sh",
+    "test:e2e:windows": "bash tests/windows/ec2-harness.sh run"
   },
   "devDependencies": {
     "bats": "1.13.0"

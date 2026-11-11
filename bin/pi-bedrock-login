@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# pi-cli-bedrock
+# pi-bedrock-login：重新登录 / 刷新 AWS 凭证（aws login 或 SSO 会话过期、临时 AK/SK 过期时使用）
+#   pi-bedrock-login               按已配置的 profile 类型重新登录（SSO / aws login），或重新输入 AK/SK
+#   pi-bedrock-login --reconfigure 重新选择凭证配置方式
+set -euo pipefail
+
+PI_BEDROCK_HOME="${PI_BEDROCK_HOME:-__PI_BEDROCK_HOME__}"
+[ -f "$PI_BEDROCK_HOME/lib/config.sh" ] || { echo "未找到安装目录 $PI_BEDROCK_HOME，请先运行 install.sh" >&2; exit 1; }
+# shellcheck source=../lib/config.sh
+. "$PI_BEDROCK_HOME/lib/config.sh"
+load_env_file "$PI_BEDROCK_HOME/env"
+# shellcheck source=../lib/common.sh
+. "$PI_BEDROCK_HOME/lib/common.sh"
+# shellcheck source=../lib/credentials.sh
+. "$PI_BEDROCK_HOME/lib/credentials.sh"
+apply_default_region
+
+case "${1:-}" in
+  --reconfigure) export PI_FORCE_CREDENTIAL_SETUP=1 ;;
+  -h | --help) sed -n '3,5p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  "") ;;
+  *) echo "未知参数: $1" >&2; exit 64 ;;
+esac
+
+require_aws_cli
+profile="${PI_AWS_PROFILE:-}"
+if [ "${PI_FORCE_CREDENTIAL_SETUP:-0}" != 1 ] && [ -n "$profile" ]; then
+  export AWS_PROFILE="$profile"
+  if [ -n "$(aws configure get sso_session --profile "$profile" 2>/dev/null)$(aws configure get sso_start_url --profile "$profile" 2>/dev/null)" ]; then
+    aws sso login --profile "$profile"
+  elif [ -n "$(aws configure get login_session --profile "$profile" 2>/dev/null)" ]; then
+    aws login --profile "$profile" --region "${AWS_REGION:-${PI_DEFAULT_AWS_REGION:-us-east-1}}"
+  elif ! aws_identity >/dev/null; then
+    # AK/SK（多为过期的临时凭证）：重新引导输入
+    export PI_FORCE_CREDENTIAL_SETUP=1
+  fi
+fi
+[ "${PI_FORCE_CREDENTIAL_SETUP:-0}" = 1 ] && unset AWS_PROFILE
+ensure_aws_credentials
+arn="$(aws_identity)" || die "凭证验证失败"
+updates=()
+[ -n "${PI_AWS_PROFILE:-}" ] && updates+=("PI_AWS_PROFILE=$PI_AWS_PROFILE")
+[ -n "${PI_DEFAULT_AWS_REGION:-}" ] && updates+=("PI_DEFAULT_AWS_REGION=$PI_DEFAULT_AWS_REGION")
+[ "${#updates[@]}" -gt 0 ] && update_env_file "$PI_BEDROCK_HOME/env" "${updates[@]}"
+log_info "AWS 凭证可用：$arn"

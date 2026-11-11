@@ -10,7 +10,7 @@ export { parseStrictReadOnlyAws } from "./strict.ts";
 export type { StrictAwsCommand } from "./strict.ts";
 export { buildStrictCommand, decideBash, STRIP_AWS_CREDENTIALS, withoutAwsCredentials } from "./policy.ts";
 export type { BashDecision, PolicyOptions } from "./policy.ts";
-export { isCredentialPath, isProtectedPath } from "./paths.ts";
+export { isCredentialPath, isProtectedPath, searchesCredentialTree } from "./paths.ts";
 export { redact } from "./redact.ts";
 export { awsConfigIssues, sanitizeAwsConfig } from "./awsconfig.mjs";
 export type { PathOptions } from "./paths.ts";

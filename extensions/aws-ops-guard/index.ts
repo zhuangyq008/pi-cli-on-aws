@@ -5,19 +5,22 @@
 //           其他需要 AWS 的命令经人工确认后才带凭证执行
 //   - write / edit：修改护栏、pi 配置、包装器、AWS 配置、shell 启动文件需确认
 //   - read / grep / find / ls：读取凭证文件需确认
+//   - powershell（Windows 上的可选工具）：无法剥离凭证与静态分析，每次都需确认
 //   - 非交互模式（pi -p）下所有需要确认的操作一律拒绝
 // 模式：confirm（默认）| readonly（拒绝所有需确认的操作）| off（完全关闭，不推荐）
 //       启动前 PI_AWS_OPS_GUARD 优先；否则读取 ~/.pi/agent/aws-ops-guard.mode（/aws-guard 写入，/reload 后保留）
 // 审计：每次需确认操作的决策写入 ~/.pi/agent/aws-ops-guard.log（JSON Lines）
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
+import { execFileSync } from "node:child_process";
 import { accessSync, appendFileSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, posix } from "node:path";
+import { basename, dirname, join, win32 } from "node:path";
 import {
   analyzePresignedUrl, analyzeRunScript, assessBashCommand, awsConfigIssues, classifyMcpTool, decideBash,
-  isCredentialPath, isProtectedPath, withoutAwsCredentials,
+  isCredentialPath, isProtectedPath, searchesCredentialTree, withoutAwsCredentials,
 } from "./classify.ts";
+import { isUnderWindowsDir } from "./paths.ts";
 import { redact } from "./redact.ts";
 
 type GuardMode = "confirm" | "readonly" | "off";
@@ -37,6 +40,7 @@ interface Inspection {
 const RUN_SCRIPT_TOOL = /(^|__)aws___run_script$/;
 const PRESIGNED_URL_TOOL = /(^|__)aws___get_presigned_url$/;
 const READ_TOOLS: ReadonlySet<string> = new Set(["read", "grep", "find", "ls"]);
+const WINDOWS = process.platform === "win32";
 const PREVIEW_MAX_LINES = 40;
 const PREVIEW_MAX_CHARS = 4000;
 const AUDIT_PREVIEW_CHARS = 500;
@@ -73,7 +77,57 @@ function immutablePath(path: string): boolean {
 // 自动带凭证执行时使用的 aws 绝对路径：只接受当前用户无法改写的位置（PATH 中的路径、符号链接目标
 // 及其所有上级目录都不可写）。例如 Apple Silicon 上 Homebrew 的 /opt/homebrew/bin/aws 归当前用户所有，
 // agent 可替换它以窃取凭证，因此不被信任——此时 bash 中的 aws 命令一律需要人工确认。
+// Windows：NTFS ACL 无法用 access(W_OK) 判断，只信任 Program Files（仅管理员可写）下的程序。
+// 目录取自 HKLM 注册表：用户级环境变量（HKCU\Environment）可以覆盖 ProgramFiles / ProgramW6432
+function windowsProgramFilesDirs(): string[] {
+  const systemRoot = /^[A-Za-z]:\\Windows$/i.test(process.env.SystemRoot ?? "") ? String(process.env.SystemRoot) : "C:\\Windows";
+  const dirs = new Set<string>();
+  for (const name of ["ProgramFilesDir", "ProgramW6432Dir"]) {
+    try {
+      const out = execFileSync(win32.join(systemRoot, "System32", "reg.exe"),
+        ["query", "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion", "/v", name], { encoding: "utf8", timeout: 5000, windowsHide: true });
+      const match = /REG_(?:EXPAND_)?SZ\s+([A-Za-z]:\\[^\r\n]*?)\s*$/m.exec(out);
+      if (match) dirs.add(match[1]);
+    } catch {
+      // 读取失败时不信任任何目录：bash 中的 aws 命令逐条确认
+    }
+  }
+  return [...dirs];
+}
+
+// pi 的 bash 工具实际使用的 Git Bash：项目级 .pi/settings.json 优先，其次全局 settings.json
+function readShellPath(file: string): string | undefined {
+  const text = readSmallFile(file);
+  if (text === undefined) return undefined;
+  try {
+    const value = (JSON.parse(text) as { shellPath?: unknown }).shellPath;
+    return typeof value === "string" ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Git for Windows 根目录（...\Git\bin\bash.exe 或 ...\Git\usr\bin\bash.exe）
+function windowsGitRoot(cwd: string, trusted: readonly string[]): string | undefined {
+  const shell = readShellPath(join(cwd, ".pi", "settings.json")) ?? readShellPath(join(agentDir, "settings.json")) ??
+    (trusted[0] ? win32.join(trusted[0], "Git", "bin", "bash.exe") : undefined);
+  const match = shell ? /^(.*?)[\\/](usr[\\/])?bin[\\/]bash\.exe$/i.exec(shell) : null;
+  return match ? match[1] : undefined;
+}
+
+const PROGRAM_FILES = WINDOWS ? windowsProgramFilesDirs() : [];
+const isTrustedWindowsPath = (path: string): boolean => PROGRAM_FILES.some((dir) => isUnderWindowsDir(path, dir));
+
+function resolveWindowsAwsPath(): string | undefined {
+  for (const dir of PROGRAM_FILES) {
+    const candidate = win32.join(dir, "Amazon", "AWSCLIV2", "aws.exe");
+    if (existsSync(candidate)) return candidate.replace(/\\/g, "/");
+  }
+  return undefined;
+}
+
 function resolveAwsPath(): string | undefined {
+  if (WINDOWS) return resolveWindowsAwsPath();
   for (const dir of (process.env.PATH ?? "").split(":")) {
     if (!dir.startsWith("/") || dir.startsWith(home) || dir.startsWith("/tmp")) continue;
     const candidate = join(dir, "aws");
@@ -100,7 +154,12 @@ function currentAwsConfigIssues(): string[] {
 }
 
 // 自动执行时在命令中调用：生成 ~/.aws 白名单快照（node 使用 pi 自身的绝对路径，脚本位于只读的护栏目录）
-const snapshotRunner = { node: process.execPath, script: join(agentDir, "extensions", "aws-ops-guard", "snapshot.mjs") };
+// Windows：命令在 Git Bash 中执行，路径使用 C:/... 形式
+const toShellPath = (p: string): string => (WINDOWS ? p.replace(/\\/g, "/") : p);
+const snapshotRunner = {
+  node: toShellPath(process.execPath),
+  script: toShellPath(join(agentDir, "extensions", "aws-ops-guard", "snapshot.mjs")),
+};
 const awsPath = resolveAwsPath();
 
 function parseMode(value: string | undefined): GuardMode | undefined {
@@ -137,17 +196,20 @@ function readSmallFile(absPath: string): string | undefined {
   }
 }
 
-// 解析符号链接：文件不存在时解析其最近的已存在父目录
+// 解析符号链接：文件不存在时解析其最近的已存在父目录。
+// Windows 用 realpathSync.native：同时展开 8.3 短文件名（C:\Users\ADMINI~1）与目录联接
+const realpathNative = WINDOWS ? realpathSync.native : realpathSync;
 function realpathOf(absPath: string): string | undefined {
   let current = absPath;
-  let suffix = "";
-  for (let i = 0; i < 64 && current !== "/"; i += 1) {
+  const suffix: string[] = [];
+  for (let i = 0; i < 64; i += 1) {
     try {
-      return join(realpathSync(current), suffix);
+      return join(realpathNative(current), ...suffix);
     } catch {
-      const name = current.split("/").pop() ?? "";
-      suffix = suffix ? join(name, suffix) : name;
-      current = dirname(current);
+      const parent = dirname(current);
+      if (parent === current) return undefined;
+      suffix.unshift(basename(current));
+      current = parent;
     }
   }
   return undefined;
@@ -155,21 +217,30 @@ function realpathOf(absPath: string): string | undefined {
 
 const PASS: Omit<Inspection, "preview"> = { reasons: [], grantCredentials: false, stripCredentials: false };
 
+// Windows：Git for Windows 安装在当前用户可写的位置（如 %LOCALAPPDATA%\Programs\Git）时，agent 可替换其中的
+// bash.exe / env.exe 劫持 bash 工具。此时该目录作为受保护位置，且不启用"只读 aws 自动带凭证"（env.exe 会拿到凭证）
+interface WindowsShellTrust {
+  readonly writableGitRoot?: string;
+  readonly strictAllowed: boolean;
+}
+
+function windowsShellTrust(cwd: string): WindowsShellTrust {
+  if (!WINDOWS) return { strictAllowed: true };
+  const gitRoot = windowsGitRoot(cwd, PROGRAM_FILES);
+  const trustedGit = gitRoot !== undefined && isTrustedWindowsPath(gitRoot);
+  return { writableGitRoot: trustedGit ? undefined : gitRoot, strictAllowed: trustedGit };
+}
+
 function inspectBash(command: string, cwd: string): Inspection {
-  const assessment = assessBashCommand(command, { readFile: readSmallFile, realpath: realpathOf, cwd, home });
+  const trust = windowsShellTrust(cwd);
+  const assessment = assessBashCommand(command, { readFile: readSmallFile, realpath: realpathOf, cwd, home, windowsGitRoot: trust.writableGitRoot });
   const needsAws = assessment.awsLabels.length > 0 || assessment.strict !== undefined;
   const awsConfigWarnings = needsAws ? currentAwsConfigIssues() : [];
   const snapshot = existsSync(snapshotRunner.script) ? snapshotRunner : undefined;
-  const decision = decideBash(assessment, { awsPath, snapshot, awsConfigWarnings });
+  const decision = decideBash(assessment, { awsPath: trust.strictAllowed ? awsPath : undefined, snapshot, awsConfigWarnings, windows: WINDOWS });
   if (decision.action === "run-with-credentials") return { ...PASS, preview: command, rewrite: decision.command };
   if (decision.action === "run-without-credentials") return { ...PASS, preview: command, stripCredentials: true };
   return { reasons: decision.reasons, preview: command, grantCredentials: decision.grantCredentials, stripCredentials: !decision.grantCredentials };
-}
-
-// grep 在包含 ~/.aws 的范围内递归搜索也会读到凭证文件
-function searchesCredentialTree(path: string, cwd: string): boolean {
-  const abs = posix.resolve(cwd, path.startsWith("~/") ? `${home}${path.slice(1)}` : path === "~" ? home : path || ".");
-  return `${home}/.aws/`.startsWith(`${abs.replace(/\/$/, "")}/`);
 }
 
 function inspect(toolName: string, input: Record<string, unknown>, cwd: string): Inspection {
@@ -181,13 +252,18 @@ function inspect(toolName: string, input: Record<string, unknown>, cwd: string):
   if (PRESIGNED_URL_TOOL.test(toolName)) return { ...PASS, reasons: analyzePresignedUrl(input), preview: json() };
   if (classifyMcpTool(toolName) === "write") return { ...PASS, reasons: [`AWS MCP 工具 ${toolName}`], preview: json() };
   if (toolName === "bash") return inspectBash(asString(input.command), cwd);
+  if (toolName === "powershell") {
+    return { ...PASS, reasons: ["PowerShell 命令（护栏无法为其剥离 AWS 凭证或做静态分析）"], preview: asString(input.command) };
+  }
   const path = asString(input.path);
   if (toolName === "write" || toolName === "edit") {
-    const hit = isProtectedPath(path, home, cwd, { agentDir, realpath: realpathOf });
+    const gitRoot = windowsShellTrust(cwd).writableGitRoot;
+    const hit = isProtectedPath(path, home, cwd, { agentDir, realpath: realpathOf, extraRoots: gitRoot ? [gitRoot] : [] });
     return { ...PASS, reasons: hit ? [`修改受保护文件 ${path}`] : [], preview: path };
   }
   if (READ_TOOLS.has(toolName)) {
-    const hit = isCredentialPath(path, home, cwd, { agentDir, realpath: realpathOf }) || (toolName === "grep" && searchesCredentialTree(path, cwd));
+    const hit = isCredentialPath(path, home, cwd, { agentDir, realpath: realpathOf }) ||
+      (toolName === "grep" && searchesCredentialTree(path, home, cwd));
     return { ...PASS, reasons: hit ? [`读取可能包含凭证的位置 ${path || cwd}`] : [], preview: json() };
   }
   return { ...PASS, preview: "" };

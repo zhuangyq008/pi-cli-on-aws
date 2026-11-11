@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # pi-cli-bedrock
-# pi-bedrock-doctor：诊断 pi + Bedrock 在 CloudShell 上的运行状态。
+# pi-bedrock-doctor：诊断 pi + Bedrock 的运行状态（CloudShell / macOS / Linux / Windows）。
 #   pi-bedrock-doctor           完整检查（含一次极小的 Bedrock 调用与一次 pi 端到端调用）
 #   pi-bedrock-doctor --quick   只做本地检查，不产生模型调用
 set -uo pipefail
@@ -53,7 +53,7 @@ check_binaries() {
   if v="$("$node" "${PI_BEDROCK_PI_BIN:-}" --version 2>/dev/null)"; then ok "pi $v"; else bad "pi 无法启动（${PI_BEDROCK_PI_BIN:-未配置}）"; fi
   local wrapper
   wrapper="$(command -v pi 2>/dev/null || true)"
-  if [ -n "$wrapper" ] && grep -q pi-cli-bedrock-wrapper "$wrapper" 2>/dev/null; then ok "PATH 中的 pi 为本工具包装器（${wrapper}）"; else warn "PATH 中的 pi 不是本工具包装器（${wrapper:-未找到}），请执行: source ~/.bashrc"; fi
+  if [ -n "$wrapper" ] && grep -q pi-cli-bedrock-wrapper "$wrapper" 2>/dev/null; then ok "PATH 中的 pi 为本工具包装器（${wrapper}）"; elif is_windows; then warn "PATH 中的 pi 不是本工具包装器（${wrapper:-未找到}），请重新打开 PowerShell / 终端窗口"; else warn "PATH 中的 pi 不是本工具包装器（${wrapper:-未找到}），请执行: source ~/.bashrc"; fi
 }
 
 check_settings() {
@@ -80,7 +80,7 @@ check_aws() {
   [ -n "${AWS_ACCESS_KEY_ID:-}" ] && src="环境变量 AWS_ACCESS_KEY_ID"
   [ -z "${AWS_CONTAINER_CREDENTIALS_FULL_URI:-}${AWS_ACCESS_KEY_ID:-}${AWS_PROFILE:-}" ] && warn "未检测到 AWS 凭证相关环境变量：pi 可能不会启用 amazon-bedrock（请设置 AWS_PROFILE 或运行 aws login / aws sso login）"
   [ -n "${AWS_PROFILE:-}" ] && src="profile ${AWS_PROFILE}"
-  if arn="$(aws sts get-caller-identity --query Arn --output text 2>/dev/null)"; then ok "身份 ${arn}（来源: ${src}）"; else bad "无法获取 AWS 身份（来源: ${src}）"; return; fi
+  if arn="$(_strip_cr aws sts get-caller-identity --query Arn --output text 2>/dev/null)"; then ok "身份 ${arn}（来源: ${src}）"; else bad "无法获取 AWS 身份（来源: ${src}）"; return; fi
   local region
   region="$(effective_region)"
   if [ -n "${PI_BEDROCK_REGION:-}" ] && [ "$PI_BEDROCK_REGION" != "${AWS_REGION:-}" ]; then
@@ -136,7 +136,7 @@ check_ops() {
 # （不能直接 grep 输出：事件流会回显用户 prompt，失败的助手消息也带 provider 字段）
 LAST_ASSISTANT_JS='
 let last;
-for (const line of require("fs").readFileSync(0, "utf8").split("\n")) {
+for (const line of require("fs").readFileSync(process.argv[1], "utf8").split("\n")) {
   try { const e = JSON.parse(line); if (e.type === "message_end" && e.message && e.message.role === "assistant") last = e.message; } catch {}
 }
 if (last) {
@@ -151,7 +151,12 @@ check_e2e() {
   # 期望答案由模型拼接得到，prompt 中不出现完整字符串
   out="$(cd "$HOME" && run_timeout 180 "$WRAPPER" -p --no-session --no-tools --mode json \
     "Join the two words PI_BEDROCK and DOCTOR_OK with an underscore and reply with only the result." </dev/null 2>&1)" || rc=$?
-  parsed="$(printf '%s' "$out" | "$PI_BEDROCK_NODE_BIN/node" -e "$LAST_ASSISTANT_JS" 2>/dev/null || true)"
+  # 经临时文件传递（Windows 上 Node 从管道读取 fd 0 不可靠）
+  local events
+  events="$(mktemp)"
+  printf '%s' "$out" >"$events"
+  parsed="$("$PI_BEDROCK_NODE_BIN/node" -e "$LAST_ASSISTANT_JS" "$(native_path "$events")" 2>/dev/null || true)"
+  rm -f "$events"
   IFS=$'\t' read -r provider stop text <<<"$parsed"
   if [ "$rc" -eq 0 ] && [ "$provider" = "$PI_BEDROCK_PROVIDER" ] && [ "$stop" != error ] && [[ "$text" == *PI_BEDROCK_DOCTOR_OK* ]]; then
     ok "pi -p 经 $PI_BEDROCK_PROVIDER / $PI_BEDROCK_MODEL 返回正确结果"

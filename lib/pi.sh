@@ -12,13 +12,33 @@ _pi_integrity() {
   esac
 }
 
-pi_installed_version() {
-  local pkg="$1/lib/node_modules/$PI_PACKAGE/package.json"
-  [ -f "$pkg" ] || return 1
-  "$PI_BEDROCK_NODE_BIN/node" -e 'process.stdout.write(require(process.argv[1]).version)' "$pkg"
+# npm 全局安装目录中的包路径：Linux / macOS 为 PREFIX/lib/node_modules，Windows 为 PREFIX/node_modules
+pi_package_dir() {
+  if is_windows; then printf '%s/node_modules/%s' "$1" "$PI_PACKAGE"; else printf '%s/lib/node_modules/%s' "$1" "$PI_PACKAGE"; fi
 }
 
-_npm() { PATH="$PI_BEDROCK_NODE_BIN:$PATH" "$PI_BEDROCK_NODE_BIN/npm" "$@"; }
+pi_installed_version() {
+  local pkg
+  pkg="$(pi_package_dir "$1")/package.json"
+  [ -f "$pkg" ] || return 1
+  "$PI_BEDROCK_NODE_BIN/node" -e 'process.stdout.write(require(process.argv[1]).version)' "$(native_path "$pkg")"
+}
+
+# pi 的入口脚本：Linux / macOS 用 npm 生成的 PREFIX/bin/pi 符号链接；
+# Windows 上 npm 生成的是 .cmd / .ps1 shim，直接使用 package.json 中 bin.pi 指向的 JS 文件
+pi_entry() {
+  local prefix="$1" dir rel
+  if ! is_windows; then printf '%s/bin/pi' "$prefix"; return 0; fi
+  dir="$(pi_package_dir "$prefix")"
+  rel="$("$PI_BEDROCK_NODE_BIN/node" -e '
+    const b = require(process.argv[1]).bin;
+    process.stdout.write(typeof b === "string" ? b : (b && b.pi) || "");
+  ' "$(native_path "$dir/package.json")" 2>/dev/null)" || return 1
+  [[ "$rel" =~ ^(\./)?[A-Za-z0-9._/-]+$ ]] && [[ "/$rel/" != */../* ]] || return 1
+  printf '%s/%s' "$dir" "${rel#./}"
+}
+
+_npm() { PATH="$(_path_entry "$PI_BEDROCK_NODE_BIN"):$PATH" "$PI_BEDROCK_NODE_BIN/npm" "$@"; }
 
 # 下载并校验 tarball，输出本地 tarball 路径
 _fetch_verified_pi() {
@@ -30,7 +50,7 @@ _fetch_verified_pi() {
   actual="$("$PI_BEDROCK_NODE_BIN/node" -e '
     const data = require("fs").readFileSync(process.argv[1]);
     process.stdout.write("sha512-" + require("crypto").createHash("sha512").update(data).digest("base64"));
-  ' "$tarball")"
+  ' "$(native_path "$tarball")")"
   if [ -z "$expected" ]; then
     log_warn "未内置 $PI_PACKAGE@$PI_VERSION 的完整性哈希，仅依赖 npm registry 校验（实际 ${actual}；可设置 PI_PACKAGE_INTEGRITY 固定）"
   elif [ "$actual" != "$expected" ]; then
@@ -46,18 +66,18 @@ install_pi() {
   local prefix="$PI_BEDROCK_HOME/npm-global" cache work current tarball
   # shellcheck disable=SC2034 # 供 install.sh 使用
   PI_BEDROCK_NPM_PREFIX="$prefix"
-  PI_BEDROCK_PI_BIN="$prefix/bin/pi"
+  PI_BEDROCK_PI_BIN="$(pi_entry "$prefix" 2>/dev/null || true)"
 
   current="$(pi_installed_version "$prefix" 2>/dev/null || true)"
-  if [ -n "$current" ] && [ "$current" = "$PI_VERSION" ] && [ -e "$PI_BEDROCK_PI_BIN" ] && [ "${PI_BEDROCK_FORCE_PI:-0}" != 1 ]; then
+  if [ -n "$current" ] && [ "$current" = "$PI_VERSION" ] && [ -n "$PI_BEDROCK_PI_BIN" ] && [ -e "$PI_BEDROCK_PI_BIN" ] && [ "${PI_BEDROCK_FORCE_PI:-0}" != 1 ]; then
     log_info "pi $current 已安装，跳过"
     return 0
   fi
 
   log_info "安装 $PI_PACKAGE@${PI_VERSION}（npm prefix: ${prefix}）"
   # 临时 npm 缓存：避免在 1 GB 的 $HOME 中留下数百 MB 缓存
-  cache="$(mktemp -d)"
-  work="$(mktemp -d)"
+  cache="$(native_path "$(mktemp -d)")"
+  work="$(native_path "$(mktemp -d)")"
   if ! tarball="$(_fetch_verified_pi "$work" "$cache")"; then
     rm -rf "$cache" "$work"
     die "pi 下载或校验失败，已中止"
@@ -69,6 +89,7 @@ install_pi() {
     die "npm 安装 $PI_PACKAGE@$PI_VERSION 失败"
   fi
   rm -rf "$cache" "$work"
-  [ -e "$PI_BEDROCK_PI_BIN" ] || die "安装后未找到 $PI_BEDROCK_PI_BIN"
+  PI_BEDROCK_PI_BIN="$(pi_entry "$prefix" 2>/dev/null || true)"
+  [ -n "$PI_BEDROCK_PI_BIN" ] && [ -e "$PI_BEDROCK_PI_BIN" ] || die "安装后未找到 pi 入口脚本（npm prefix: ${prefix}）"
   log_info "pi $(pi_installed_version "$prefix") 安装完成"
 }
