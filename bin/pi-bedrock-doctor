@@ -6,7 +6,7 @@
 set -uo pipefail
 
 PI_BEDROCK_HOME="${PI_BEDROCK_HOME:-__PI_BEDROCK_HOME__}"
-[ -f "$PI_BEDROCK_HOME/lib/config.sh" ] || { echo "未找到安装目录 $PI_BEDROCK_HOME，请先运行 install.sh" >&2; exit 1; }
+[ -f "$PI_BEDROCK_HOME/lib/config.sh" ] || { echo "未找到安装目录 ${PI_BEDROCK_HOME}，请先运行 install.sh" >&2; exit 1; }
 # 先加载 env 文件，再加载 common.sh 的默认值（保证 env 文件优先于默认值）
 # shellcheck source=../lib/config.sh
 . "$PI_BEDROCK_HOME/lib/config.sh"
@@ -49,11 +49,11 @@ check_runtime() {
 check_binaries() {
   section "Node.js / pi"
   local node="${PI_BEDROCK_NODE_BIN:-}/node" v
-  if v="$("$node" -v 2>/dev/null)" && version_ge "$v" "$PI_MIN_NODE"; then ok "Node.js $v（$node）"; else bad "Node.js 不可用或版本 < $PI_MIN_NODE（$node）"; return; fi
+  if v="$("$node" -v 2>/dev/null)" && version_ge "$v" "$PI_MIN_NODE"; then ok "Node.js ${v}（${node}）"; else bad "Node.js 不可用或版本 < ${PI_MIN_NODE}（${node}）"; return; fi
   if v="$("$node" "${PI_BEDROCK_PI_BIN:-}" --version 2>/dev/null)"; then ok "pi $v"; else bad "pi 无法启动（${PI_BEDROCK_PI_BIN:-未配置}）"; fi
   local wrapper
   wrapper="$(command -v pi 2>/dev/null || true)"
-  if [ -n "$wrapper" ] && grep -q pi-cli-bedrock-wrapper "$wrapper" 2>/dev/null; then ok "PATH 中的 pi 为本工具包装器（$wrapper）"; else warn "PATH 中的 pi 不是本工具包装器（${wrapper:-未找到}），请执行: source ~/.bashrc"; fi
+  if [ -n "$wrapper" ] && grep -q pi-cli-bedrock-wrapper "$wrapper" 2>/dev/null; then ok "PATH 中的 pi 为本工具包装器（${wrapper}）"; else warn "PATH 中的 pi 不是本工具包装器（${wrapper:-未找到}），请执行: source ~/.bashrc"; fi
 }
 
 check_settings() {
@@ -64,7 +64,7 @@ check_settings() {
     const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
     process.stdout.write(`${s.defaultProvider ?? "-"}/${s.defaultModel ?? "-"}/${s.defaultThinkingLevel ?? "-"}`);
   ' "$file" 2>/dev/null)" || { bad "无法读取 $file"; return; }
-  if [ "${got%/*}" = "$PI_BEDROCK_PROVIDER/$PI_BEDROCK_MODEL" ]; then ok "默认模型 ${got%/*}（thinking: ${got##*/}）"; else warn "默认模型已被修改为 ${got%/*}（安装时为 $PI_BEDROCK_PROVIDER/$PI_BEDROCK_MODEL）"; fi
+  if [ "${got%/*}" = "$PI_BEDROCK_PROVIDER/$PI_BEDROCK_MODEL" ]; then ok "默认模型 ${got%/*}（thinking: ${got##*/}）"; else warn "默认模型已被修改为 ${got%/*}（安装时为 $PI_BEDROCK_PROVIDER/${PI_BEDROCK_MODEL}）"; fi
   local enabled
   enabled="$("$PI_BEDROCK_NODE_BIN/node" -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.stdout.write(String((s.enabledModels??[]).length))' "$file" 2>/dev/null || echo 0)"
   if [ "$enabled" -gt 0 ]; then ok "/model 默认显示 $enabled 个当前区域可用的模型（Tab 切换查看全部）"; else warn "未设置 enabledModels：/model 会显示全部内置模型，其中部分在当前区域不可用（重新运行 install.sh 可筛选）"; fi
@@ -80,13 +80,13 @@ check_aws() {
   [ -n "${AWS_ACCESS_KEY_ID:-}" ] && src="环境变量 AWS_ACCESS_KEY_ID"
   [ -z "${AWS_CONTAINER_CREDENTIALS_FULL_URI:-}${AWS_ACCESS_KEY_ID:-}${AWS_PROFILE:-}" ] && warn "未检测到 AWS 凭证相关环境变量：pi 可能不会启用 amazon-bedrock（请设置 AWS_PROFILE 或运行 aws login / aws sso login）"
   [ -n "${AWS_PROFILE:-}" ] && src="profile ${AWS_PROFILE}"
-  if arn="$(aws sts get-caller-identity --query Arn --output text 2>/dev/null)"; then ok "身份 $arn（来源: $src）"; else bad "无法获取 AWS 身份（来源: $src）"; return; fi
+  if arn="$(aws sts get-caller-identity --query Arn --output text 2>/dev/null)"; then ok "身份 ${arn}（来源: ${src}）"; else bad "无法获取 AWS 身份（来源: ${src}）"; return; fi
   local region
   region="$(effective_region)"
   if [ -n "${PI_BEDROCK_REGION:-}" ] && [ "$PI_BEDROCK_REGION" != "${AWS_REGION:-}" ]; then
-    ok "Bedrock 源区域固定为 $region（shell 区域 ${AWS_REGION:-未设置} 保持不变）"
+    ok "Bedrock 源区域固定为 ${region}（shell 区域 ${AWS_REGION:-未设置} 保持不变）"
   else
-    ok "Bedrock 源区域 $region（跟随 AWS_REGION）"
+    ok "Bedrock 源区域 ${region}（跟随 AWS_REGION）"
   fi
   [ "$QUICK" = 1 ] && return
   local status
@@ -96,7 +96,7 @@ check_aws() {
     throttled) bad "ThrottlingException：$region 的 TPM 配额可能为 0。重新运行 install.sh 自动选择有配额的区域，或在 Service Quotas 申请提额" ;;
     denied) bad "AccessDeniedException：需要 bedrock:InvokeModel / bedrock:InvokeModelWithResponseStream（首次使用第三方模型还需 aws-marketplace:Subscribe 等权限）" ;;
     unavailable) bad "$region 不支持推理配置文件 $PI_BEDROCK_MODEL" ;;
-    *) bad "Bedrock 调用失败（$status），可设置 PI_BEDROCK_DEBUG=1 查看详情" ;;
+    *) bad "Bedrock 调用失败（${status}），可设置 PI_BEDROCK_DEBUG=1 查看详情" ;;
   esac
 }
 
@@ -120,7 +120,7 @@ check_ops() {
   local ops="${PI_OPS_AWS_REGION:-${AWS_REGION:-us-east-1}}" out
   if [ -x "$PI_AWS_MCP_PROXY_BIN" ]; then ok "mcp-proxy-for-aws-cli 已安装"; else bad "未找到 $PI_AWS_MCP_PROXY_BIN"; fi
   if grep -q "$PI_BEDROCK_HOME/bin/aws-mcp-proxy" "$PI_CODING_AGENT_DIR/mcp.json" 2>/dev/null; then
-    ok "mcp.json 已配置 aws-mcp（endpoint aws-mcp.$(aws_mcp_endpoint_region "$ops").api.aws，默认运维区域 $ops）"
+    ok "mcp.json 已配置 aws-mcp（endpoint aws-mcp.$(aws_mcp_endpoint_region "$ops").api.aws，默认运维区域 ${ops}）"
   else
     bad "$PI_CODING_AGENT_DIR/mcp.json 中没有本工具的 aws-mcp 条目"
   fi
@@ -156,7 +156,7 @@ check_e2e() {
   if [ "$rc" -eq 0 ] && [ "$provider" = "$PI_BEDROCK_PROVIDER" ] && [ "$stop" != error ] && [[ "$text" == *PI_BEDROCK_DOCTOR_OK* ]]; then
     ok "pi -p 经 $PI_BEDROCK_PROVIDER / $PI_BEDROCK_MODEL 返回正确结果"
   elif [ -n "$provider" ] && [ "$provider" != "$PI_BEDROCK_PROVIDER" ]; then
-    bad "pi 使用了 $provider 而不是 $PI_BEDROCK_PROVIDER（可能未检测到 AWS 凭证而回退到其他 provider）"
+    bad "pi 使用了 $provider 而不是 ${PI_BEDROCK_PROVIDER}（可能未检测到 AWS 凭证而回退到其他 provider）"
   else
     bad "pi -p 调用失败（exit=$rc, stopReason=${stop:-无}）: $(printf '%s' "${text:-$out}" | tail -c 300)"
   fi

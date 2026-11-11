@@ -45,7 +45,7 @@ _stage_skills() {
     elif [ -d "$root/skills/$s" ]; then
       cp -R "$root/skills/$s" "$stage/"
     else
-      log_warn "上游未找到 skill: $s（ref $PI_AWS_TOOLKIT_REF）"
+      log_warn "上游未找到 skill: ${s}（ref ${PI_AWS_TOOLKIT_REF}）"
     fi
   done
   find "$stage" -type l -delete
@@ -83,7 +83,7 @@ install_aws_skills() {
   manifest="$(_skills_manifest "$tmp/stage" "$tmp/rules.md")"
   if [ "$PI_AWS_SKILLS_SHA256" != skip ] && [ "$manifest" != "$PI_AWS_SKILLS_SHA256" ]; then
     rm -rf "$tmp"
-    log_warn "AWS skills 内容校验失败（期望 $PI_AWS_SKILLS_SHA256，实际 $manifest），已跳过安装"
+    log_warn "AWS skills 内容校验失败（期望 ${PI_AWS_SKILLS_SHA256}，实际 ${manifest}），已跳过安装"
     log_warn "若你有意修改了 PI_AWS_TOOLKIT_REF / PI_AWS_SKILLS，请审阅内容后设置 PI_AWS_SKILLS_SHA256=$manifest 重新安装"
     return 0
   fi

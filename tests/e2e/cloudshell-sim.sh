@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 在本机模拟 AWS CloudShell 运行环境，对 install.sh → pi → Bedrock 做端到端验证。
 # 模拟内容：
-#   - 独立 $HOME（CloudShell 只持久化 $HOME）
+#   - 独立 ${HOME}（CloudShell 只持久化 ${HOME}）
 #   - AWS_EXECUTION_ENV=CloudShell、AWS_REGION/AWS_DEFAULT_REGION=SIM_REGION
 #   - 凭证仅来自 localhost 容器凭证端点（与 CloudShell 相同机制），禁用 IMDS
 #   - PATH 中只有低于 22.19 的 Node（模拟 CloudShell 自带 Node 版本不足）
@@ -77,7 +77,7 @@ check "凭证仅来自容器端点（模拟环境内 sts 可用）" \
 echo "  宿主 Node: $("$HOST_NODE" -v)（模拟 CloudShell 自带的旧版 Node）"
 
 # ---- 1. 安装 ----
-step "1. 运行 install.sh（CloudShell 区域 $SIM_REGION）"
+step "1. 运行 install.sh（CloudShell 区域 ${SIM_REGION}）"
 INSTALL_START=$(date +%s)
 if (cd "$PROJECT" && "${SIM_ENV[@]}" bash "$REPO_ROOT/install.sh") >"$WORK/install.log" 2>&1; then
   pass "install.sh 成功（$(($(date +%s) - INSTALL_START)) 秒）"
@@ -108,9 +108,9 @@ echo "  安装占用: $(du -sh "$SIM_HOME/.local/share/pi-bedrock" | cut -f1)，
 # ---- 2. 新 shell ----
 step "2. 新 shell 中的 pi"
 WHICH_PI="$(in_shell 'command -v pi')"
-check "PATH 中的 pi 指向包装器（$WHICH_PI）" test "$WHICH_PI" = "$SIM_HOME/.local/bin/pi"
+check "PATH 中的 pi 指向包装器（${WHICH_PI}）" test "$WHICH_PI" = "$SIM_HOME/.local/bin/pi"
 VERSION="$(in_shell 'pi --version')"
-check "pi --version = $VERSION（旧版 Node 未被 shebang 选中）" test -n "$VERSION"
+check "pi --version = ${VERSION}（旧版 Node 未被 shebang 选中）" test -n "$VERSION"
 MODELS="$(in_shell 'pi --list-models kimi-k3.1' 2>&1 || true)"
 check "pi --list-models 包含 Kimi K3.1（amazon-bedrock 已识别容器凭证）" grep -q "global.moonshotai.kimi-k3.1" <<<"$MODELS"
 
@@ -139,7 +139,7 @@ step "4b. bash 凭证模型：普通命令无凭证，简单只读 aws 命令自
 in_shell 'timeout 300 pi -p --no-session --mode json "Use the bash tool to run exactly this command, then reply DONE: echo CRED_VARS=\$(printenv | cut -d= -f1 | grep -c -e _TOKEN -e _KEY_ID -e _FULL_URI)"' >"$WORK/bash-nocreds.jsonl" 2>&1 || true
 check "普通 bash 命令中没有 AWS 凭证变量（CRED_VARS=0）" grep -q 'CRED_VARS=0' "$WORK/bash-nocreds.jsonl"
 in_shell 'timeout 300 pi -p --no-session --mode json "Use the bash tool to run exactly this command, then reply DONE: aws sts get-caller-identity --query Account --output text"' >"$WORK/bash-aws.jsonl" 2>&1 || true
-check "简单只读 aws 命令自动带凭证执行（返回账号 $ACCOUNT）" grep -q "$ACCOUNT" "$WORK/bash-aws.jsonl"
+check "简单只读 aws 命令自动带凭证执行（返回账号 ${ACCOUNT}）" grep -q "$ACCOUNT" "$WORK/bash-aws.jsonl"
 check "简单只读 aws 命令未触发确认" bash -c "! grep -q 'aws sts get-caller-identity' '$SIM_HOME/.pi/agent/aws-ops-guard.log' 2>/dev/null"
 
 # ---- 5. AWS MCP 只读调用 ----
@@ -151,7 +151,7 @@ GUARD_BEFORE="$(guard_log | wc -l)"
 in_shell "timeout 400 pi -p --no-session --mode json '$READ_PROMPT'" >"$WORK/mcp-read.jsonl" 2>&1 || true
 check "调用了 mcp__aws_mcp__aws___run_script" grep -q '"toolName":"mcp__aws_mcp__aws___run_script"' "$WORK/mcp-read.jsonl"
 check "返回账号 $ACCOUNT" grep -q "ACCOUNT=$ACCOUNT" "$WORK/mcp-read.jsonl"
-check "默认运维区域为 CloudShell 区域 $SIM_REGION（而非 Bedrock 区域 ${CHOSEN:-无}）" grep -q "${SIM_REGION}a" "$WORK/mcp-read.jsonl"
+check "默认运维区域为 CloudShell 区域 ${SIM_REGION}（而非 Bedrock 区域 ${CHOSEN:-无}）" grep -q "${SIM_REGION}a" "$WORK/mcp-read.jsonl"
 check "只读调用未被护栏拦截（审计日志无新增）" test "$(guard_log | wc -l)" -eq "$GUARD_BEFORE"
 
 # ---- 6. 写操作护栏 ----

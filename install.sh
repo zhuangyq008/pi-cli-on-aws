@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # pi-cli-bedrock 安装器：在 AWS CloudShell 上安装 pi coding agent（默认 Amazon Bedrock + Kimi K3.1），
 # 并集成 AWS MCP Server、运维 skills 与 AWS 写操作护栏，用于云上运维（成本 / 可观测 / 告警）。
-# 幂等、非交互；所有文件位于 $HOME（CloudShell 重启后保留）。用法见 --help。
+# 幂等、非交互；所有文件位于 ${HOME}（CloudShell 重启后保留）。用法见 --help。
 set -euo pipefail
 umask 077   # 新建的配置、日志、凭证相关文件仅当前用户可读
 
@@ -40,10 +40,10 @@ usage() {
 选项:
   --region REGION     固定 Bedrock 源区域（默认: 自动探测，优先 CloudShell 当前区域）
   --no-probe          不探测区域，pi 直接使用 AWS_REGION
-  --model ID          默认模型（默认: $PI_BEDROCK_MODEL）
-  --thinking LEVEL    默认思考等级 off|minimal|low|medium|high|xhigh|max（默认: $PI_BEDROCK_THINKING）
-  --pi-version VER    pi 版本（默认: $PI_VERSION，可设为 latest）
-  --node MODE         auto|private|system（默认: $PI_BEDROCK_NODE_MODE）
+  --model ID          默认模型（默认: ${PI_BEDROCK_MODEL}）
+  --thinking LEVEL    默认思考等级 off|minimal|low|medium|high|xhigh|max（默认: ${PI_BEDROCK_THINKING}）
+  --pi-version VER    pi 版本（默认: ${PI_VERSION}，可设为 latest）
+  --node MODE         auto|private|system（默认: ${PI_BEDROCK_NODE_MODE}）
   --no-mcp            不安装 AWS MCP Server（节省约 220 MB）
   --no-skills         不预装 AWS 运维 skills 与规则文件
   --all-models        /model 显示 pi 内置的全部 Bedrock 模型（默认只启用当前区域可用的模型）
@@ -101,7 +101,7 @@ preflight() {
   local o
   # bash 3.2（macOS 自带）在 set -u 下展开空数组会报错，使用 ${arr[@]+...} 形式
   for o in ${SECURITY_OVERRIDES[@]+"${SECURITY_OVERRIDES[@]}"}; do
-    log_warn "检测到覆盖固定版本 / 完整性校验的设置：$o（请确认来源可信）"
+    log_warn "检测到覆盖固定版本 / 完整性校验的设置：${o}（请确认来源可信）"
   done
   if is_cloudshell; then
     log_info "检测到 AWS CloudShell（区域 ${AWS_REGION:-未知}，\$HOME 剩余 ${avail} MB）"
@@ -140,20 +140,20 @@ resolve_bedrock_region() {
     log_warn "未找到 aws CLI，跳过区域探测"
     return 0
   fi
-  log_info "探测 Bedrock 源区域（模型 $PI_BEDROCK_MODEL，每次探测为一次 maxTokens=16 的极小调用）"
+  log_info "探测 Bedrock 源区域（模型 ${PI_BEDROCK_MODEL}，每次探测为一次 maxTokens=16 的极小调用）"
   chosen="$(select_bedrock_region "$PI_BEDROCK_MODEL" "${current:-us-east-1}")" || rc=$?
   case "$rc" in
     0)
       if [ "$chosen" = "$current" ]; then
         log_info "当前区域 $current 可直接调用 $PI_BEDROCK_MODEL"
       else
-        log_warn "当前区域 ${current:-未设置} 无法调用 $PI_BEDROCK_MODEL（多为 TPM 配额为 0），已将 pi 的 Bedrock 源区域固定为 $chosen"
+        log_warn "当前区域 ${current:-未设置} 无法调用 ${PI_BEDROCK_MODEL}（多为 TPM 配额为 0），已将 pi 的 Bedrock 源区域固定为 $chosen"
         log_warn "global.* 推理配置文件本身会跨全球商业区域路由，源区域只决定配额与 CloudWatch 指标归属"
         printf '%s' "$chosen"
       fi
       ;;
     3) log_warn "凭证或 IAM 权限不足，无法调用 Bedrock。安装将继续，请修复权限后运行 pi-bedrock-doctor" ;;
-    *) log_warn "所有候选区域均无法调用 $PI_BEDROCK_MODEL（配额为 0 或模型未开放）。安装将继续，请在 Service Quotas 申请提额后运行 pi-bedrock-doctor" ;;
+    *) log_warn "所有候选区域均无法调用 ${PI_BEDROCK_MODEL}（配额为 0 或模型未开放）。安装将继续，请在 Service Quotas 申请提额后运行 pi-bedrock-doctor" ;;
   esac
 }
 
@@ -236,7 +236,7 @@ write_configuration() {
   merge_settings "$PI_BEDROCK_NODE_BIN/node" "$PI_BEDROCK_HOME/lib" "$PI_CODING_AGENT_DIR/settings.json" \
     "$PI_BEDROCK_PROVIDER" "$PI_BEDROCK_MODEL" "$PI_BEDROCK_THINKING" \
     "$PI_BEDROCK_NODE_BIN/npm" "$PI_BEDROCK_NPM_PREFIX" "$PI_BEDROCK_HOME/settings.orig.json" "${PI_ENABLED_MODELS_JSON:-}"
-  log_info "已更新 $PI_CODING_AGENT_DIR/settings.json（默认 $PI_BEDROCK_PROVIDER/$PI_BEDROCK_MODEL，thinking=$PI_BEDROCK_THINKING）"
+  log_info "已更新 $PI_CODING_AGENT_DIR/settings.json（默认 $PI_BEDROCK_PROVIDER/${PI_BEDROCK_MODEL}，thinking=${PI_BEDROCK_THINKING}）"
   local launcher="$PI_BEDROCK_HOME/bin/aws-mcp-proxy"
   if [ "$OPT_MCP" = 1 ]; then
     configure_mcp "$PI_BEDROCK_NODE_BIN/node" "$PI_BEDROCK_HOME/lib" "$PI_CODING_AGENT_DIR/mcp.json" "$launcher"
@@ -278,8 +278,8 @@ print_summary() {
 $(printf '%s' "${_C_GRN}")安装完成$(printf '%s' "${_C_OFF}")
   pi            $PI_BIN_DIR/pi  (pi $PI_VERSION)
   默认模型      $PI_BEDROCK_PROVIDER / $PI_BEDROCK_MODEL
-  Bedrock 区域  ${region:-跟随当前 AWS 区域（$ops_region）}
-  AWS MCP       $([ "$OPT_MCP" = 1 ] && echo "aws-mcp（默认运维区域 = 当前 AWS 区域 $ops_region）" || echo "未安装")
+  Bedrock 区域  ${region:-跟随当前 AWS 区域（${ops_region}）}
+  AWS MCP       $([ "$OPT_MCP" = 1 ] && echo "aws-mcp（默认运维区域 = 当前 AWS 区域 ${ops_region}）" || echo "未安装")
   运维 skills   $(if [ "$OPT_SKILLS" = 1 ]; then skills_dir; else echo "未安装"; fi)
   写操作护栏    aws-ops-guard（写操作逐次人工确认；/aws-guard 查看或切换模式）
   配置          $PI_BEDROCK_HOME/env, $PI_CODING_AGENT_DIR/{settings,mcp}.json

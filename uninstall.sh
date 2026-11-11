@@ -30,7 +30,7 @@ main() {
   for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.bash_profile"; do remove_rc_block "$rc"; done
   log_info "已移除 shell 启动文件中的 pi-bedrock 段落"
   remove_home
-  log_info "卸载完成。会话与凭证仍保留在 $PI_CODING_AGENT_DIR（如不需要可手动删除）"
+  log_info "卸载完成。会话与凭证仍保留在 ${PI_CODING_AGENT_DIR}（如不需要可手动删除）"
 }
 
 revert_settings() {

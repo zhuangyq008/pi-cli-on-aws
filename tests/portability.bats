@@ -117,3 +117,19 @@ limited_path() {
   touch "$HOME/.bash_profile"
   [ "$(rc_files | tr '\n' ' ')" = "$HOME/.bashrc $HOME/.zshrc $HOME/.bash_profile " ]
 }
+
+@test "静态检查：变量后不能直接跟非 ASCII 字符（macOS bash 3.2 会把多字节首字节并入变量名）" {
+  run perl -ne 'print "$ARGV:$.: $_" if /(?<!\\)\$[A-Za-z_]\w*[^\x00-\x7F]/; close ARGV if eof' \
+    "$REPO_ROOT"/install.sh "$REPO_ROOT"/uninstall.sh "$REPO_ROOT"/lib/*.sh "$REPO_ROOT"/bin/pi \
+    "$REPO_ROOT"/bin/pi-bedrock-doctor "$REPO_ROOT"/bin/aws-mcp-proxy "$REPO_ROOT"/tests/e2e/*.sh
+  echo "$output"
+  [ -z "$output" ]
+}
+
+@test "path_immutable：系统目录不可写为真，用户可写目录为假" {
+  [ "$(id -u)" -eq 0 ] && skip "root 对所有路径可写"
+  path_immutable /usr/bin
+  ! path_immutable "$HOME"
+  mkdir -p "$SANDBOX/opt/homebrew/bin"
+  ! path_immutable "$SANDBOX/opt/homebrew/bin/node"
+}

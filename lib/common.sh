@@ -113,6 +113,16 @@ run_timeout() {
   fi
 }
 
+# path_immutable PATH：PATH 及其所有上级目录对当前用户都不可写（例如 Homebrew 的 /opt/homebrew、nvm 的 ~/.nvm 都可写）
+path_immutable() {
+  local p="$1"
+  while :; do
+    [ -w "$p" ] && return 1
+    [ "$p" = / ] && return 0
+    p="$(dirname "$p")"
+  done
+}
+
 # resolve_path PATH：解析符号链接后的绝对路径（macOS 旧版 readlink 不支持 -f）
 resolve_path() {
   if readlink -f / >/dev/null 2>&1; then

@@ -83,7 +83,7 @@ install_mcp_proxy() {
     log_info "$PI_MCP_PROXY_PKG $PI_MCP_PROXY_VERSION 已安装，跳过"
     return 0
   fi
-  log_info "安装 $PI_MCP_PROXY_PKG==$PI_MCP_PROXY_VERSION（Python $PI_MCP_PYTHON，依赖哈希锁定，位于 $dir）"
+  log_info "安装 $PI_MCP_PROXY_PKG==${PI_MCP_PROXY_VERSION}（Python ${PI_MCP_PYTHON}，依赖哈希锁定，位于 ${dir}）"
   _PI_UV_CACHE="$(mktemp -d)"
   # 直接在最终位置重建（venv 内脚本的 shebang 是绝对路径，不能搬移）；失败时重新运行安装器即可
   rm -rf "$venv" "$dir/tools" "$dir/tool-bin"

@@ -8,7 +8,7 @@ set -euo pipefail
 
 PI_BEDROCK_HOME="${PI_BEDROCK_HOME:-__PI_BEDROCK_HOME__}"
 if [ ! -f "$PI_BEDROCK_HOME/lib/config.sh" ]; then
-  echo "pi-bedrock: 未找到安装目录 $PI_BEDROCK_HOME，请重新运行 install.sh" >&2
+  echo "pi-bedrock: 未找到安装目录 ${PI_BEDROCK_HOME}，请重新运行 install.sh" >&2
   exit 1
 fi
 # shellcheck source=../lib/config.sh

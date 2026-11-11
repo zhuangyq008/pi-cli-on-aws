@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # 确保存在 Node.js >= PI_MIN_NODE。
-# CloudShell 只持久化 $HOME（1 GB），因此私有 Node 安装在 $PI_BEDROCK_HOME/node 下；
+# CloudShell 只持久化 ${HOME}（1 GB），因此私有 Node 安装在 $PI_BEDROCK_HOME/node 下；
 # 结果写入全局变量 PI_BEDROCK_NODE_BIN（包含 node 与 npm 的目录）。
 
 # PI_BEDROCK_NODE_MODE: auto（系统 Node 满足版本则复用，否则安装私有 Node）| private | system
@@ -23,19 +23,20 @@ ensure_node() {
       if _system_node_ok; then
         local sys_bin
         sys_bin="$(dirname "$(resolve_path "$(command -v node)")")"
-        # 路径需能安全写入 env 文件；nvm 等位于 $HOME 的 Node 可能随用户操作变化，auto 模式下不复用
-        if [[ "$sys_bin" =~ ^/[A-Za-z0-9._/@+-]+$ ]] && { [ "$PI_BEDROCK_NODE_MODE" = system ] || [[ "$sys_bin" != "$HOME"/* ]]; }; then
+        # 路径需能安全写入 env 文件；auto 模式下只复用当前用户不可改写的 Node（pi 以它运行并持有凭证，
+        # 可写位置如 Homebrew 的 /opt/homebrew、nvm 的 ~/.nvm 可被 agent 替换）
+        if [[ "$sys_bin" =~ ^/[A-Za-z0-9._/@+-]+$ ]] && { [ "$PI_BEDROCK_NODE_MODE" = system ] || path_immutable "$sys_bin/node"; }; then
           PI_BEDROCK_NODE_BIN="$sys_bin"
-          log_info "复用系统 Node.js $(node -v)（$PI_BEDROCK_NODE_BIN）"
+          log_info "复用系统 Node.js $(node -v)（${PI_BEDROCK_NODE_BIN}）"
           return 0
         fi
         [ "$PI_BEDROCK_NODE_MODE" = system ] && die "系统 Node.js 路径包含不支持的字符: $sys_bin"
-        log_info "检测到 $sys_bin 下的 Node.js（位于 \$HOME，可能被 nvm 等切换），改用私有 Node.js"
+        log_info "检测到 $sys_bin 下的 Node.js（当前用户可写，如 Homebrew / nvm），改用私有 Node.js"
       fi
-      [ "$PI_BEDROCK_NODE_MODE" = system ] && die "系统 Node.js 不满足 >= $PI_MIN_NODE（当前: $(node -v 2>/dev/null || echo 无)）"
+      [ "$PI_BEDROCK_NODE_MODE" = system ] && die "系统 Node.js 不满足 >= ${PI_MIN_NODE}（当前: $(node -v 2>/dev/null || echo 无)）"
       ;;
     private) ;;
-    *) die "非法的 PI_BEDROCK_NODE_MODE: $PI_BEDROCK_NODE_MODE（可选 auto|private|system）" ;;
+    *) die "非法的 PI_BEDROCK_NODE_MODE: ${PI_BEDROCK_NODE_MODE}（可选 auto|private|system）" ;;
   esac
 
   if _private_node_ok && [ "${PI_BEDROCK_FORCE_NODE:-0}" != 1 ]; then
@@ -43,7 +44,7 @@ ensure_node() {
     log_info "复用私有 Node.js $("$PI_BEDROCK_NODE_BIN/node" -v)"
     return 0
   fi
-  log_info "安装私有 Node.js v$PI_NODE_VERSION（系统 Node.js: $(node -v 2>/dev/null || echo 无)，pi 需要 >= $PI_MIN_NODE）"
+  log_info "安装私有 Node.js v${PI_NODE_VERSION}（系统 Node.js: $(node -v 2>/dev/null || echo 无)，pi 需要 >= ${PI_MIN_NODE}）"
   install_private_node
 }
 

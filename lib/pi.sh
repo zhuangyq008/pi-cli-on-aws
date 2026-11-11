@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# 使用指定 Node 把 pi 安装到 $PI_BEDROCK_HOME/npm-global（位于 $HOME，CloudShell 重启后保留）。
+# 使用指定 Node 把 pi 安装到 $PI_BEDROCK_HOME/npm-global（位于 ${HOME}，CloudShell 重启后保留）。
 # 先下载 tarball 并校验固定的 sha512（npm dist.integrity），再从本地 tarball 安装；
 # 传递依赖由 pi 发布的 npm-shrinkwrap.json 锁定，npm 安装时逐个校验 integrity。
 # 结果写入全局变量 PI_BEDROCK_PI_BIN 与 PI_BEDROCK_NPM_PREFIX。
@@ -32,9 +32,9 @@ _fetch_verified_pi() {
     process.stdout.write("sha512-" + require("crypto").createHash("sha512").update(data).digest("base64"));
   ' "$tarball")"
   if [ -z "$expected" ]; then
-    log_warn "未内置 $PI_PACKAGE@$PI_VERSION 的完整性哈希，仅依赖 npm registry 校验（实际 $actual；可设置 PI_PACKAGE_INTEGRITY 固定）"
+    log_warn "未内置 $PI_PACKAGE@$PI_VERSION 的完整性哈希，仅依赖 npm registry 校验（实际 ${actual}；可设置 PI_PACKAGE_INTEGRITY 固定）"
   elif [ "$actual" != "$expected" ]; then
-    log_error "$PI_PACKAGE@$PI_VERSION 完整性校验失败（期望 $expected，实际 $actual）"
+    log_error "$PI_PACKAGE@$PI_VERSION 完整性校验失败（期望 ${expected}，实际 ${actual}）"
     return 1
   else
     log_info "tarball 完整性与内置 sha512 一致"
@@ -54,7 +54,7 @@ install_pi() {
     return 0
   fi
 
-  log_info "安装 $PI_PACKAGE@$PI_VERSION（npm prefix: $prefix）"
+  log_info "安装 $PI_PACKAGE@${PI_VERSION}（npm prefix: ${prefix}）"
   # 临时 npm 缓存：避免在 1 GB 的 $HOME 中留下数百 MB 缓存
   cache="$(mktemp -d)"
   work="$(mktemp -d)"
