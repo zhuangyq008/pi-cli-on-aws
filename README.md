@@ -5,6 +5,7 @@
 - **模型**：默认 Amazon Bedrock `global.moonshotai.kimi-k3.1`（Kimi K3.1），无需 API Key。CloudShell 上直接使用控制台登录身份；本地没有 AWS 凭证时，安装器会**引导配置**（aws login / IAM Identity Center / Access Key + Secret Key（+ Session Token）/ 已有 profile，Region 必填）
 - **AWS MCP Server**：集成 [Agent Toolkit for AWS](https://aws.amazon.com/products/developer-tools/agent-toolkit-for-aws/) 的托管 MCP（SigV4），可调用 300+ 服务的 AWS API
 - **运维 skills 与规则**：预装成本计费、可观测、排障、安全、IAM、Well-Architected、operations、resilience 等官方 skills，以及中文运维规则
+- **工具选择：CLI 优先**：成本、指标、日志、告警、资源配置等例行查询默认用 bash 中的单条只读 `aws` 命令（自动带凭证、无需确认）；跨区域 / 批量查询用 AWS MCP 的 `aws___run_script` 一次完成；skills 只在写操作、排障或不熟悉的服务时按需加载。依据见 [docs/benchmark-mcp-vs-cli.md](docs/benchmark-mcp-vs-cli.md)：与"MCP + 每次先加载 skill"相比，平均 tokens 降低 64%、耗时降低 42%
 - **写操作护栏**：`aws-ops-guard` 扩展——查询直接执行；创建告警、修改预算等写操作逐次人工确认；非交互模式一律拒绝；全部决策写审计日志
 
 适用场景：为客户提供 **成本与用量分析、CloudWatch 可观测、告警配置、故障排查、安全检查** 的智能运维助手。
@@ -168,7 +169,7 @@ pi 内置的 Bedrock 模型目录约有 200 个模型，其中多数在某个区
 
 | 通道 | 行为 |
 |---|---|
-| AWS MCP `aws___run_script`（推荐） | 静态分析代码：每个 AWS 调用都是 `call_boto3(operation_name="完整字面量")` 的读操作时直接执行；写操作、敏感读取、别名 / `exec` / 动态操作名 / `boto3` / 子进程需确认；Athena / Redshift Data / DynamoDB PartiQL 仅当该次调用的 SQL 是完整字面量只读语句时放行 |
+| AWS MCP `aws___run_script`（跨区域 / 批量查询） | 静态分析代码：每个 AWS 调用都是 `call_boto3(operation_name="完整字面量")` 的读操作时直接执行；写操作、敏感读取、别名 / `exec` / 动态操作名 / `boto3` / 子进程需确认；Athena / Redshift Data / DynamoDB PartiQL 仅当该次调用的 SQL 是完整字面量只读语句时放行 |
 | 其他 AWS MCP 工具 | 文档 / skills / 区域查询 / 任务状态等已知只读工具放行；`get_presigned_url` 的 upload 及未知工具需确认 |
 | bash：普通命令 | **剥离全部 AWS 凭证后执行**（`unset` 凭证变量、禁用共享配置与 IMDS），无需确认——即使分析漏判也无法访问 AWS |
 | bash：简单只读 `aws` 命令（续） | aws 进程读取的是**执行时生成的 `~/.aws` 白名单快照**（作为该进程的 HOME，结束后删除）：config / credentials 按 = 或 : 分隔、任意换行符宽松解析后，只按规范格式写出白名单内的键（region、凭证、sso_*、role_arn 等），`credential_process`、`*endpoint_url`、`ca_bundle`、`ec2_metadata_service_endpoint`、`cli_pager`、`[plugins]`、`[services]` 及所有嵌套设置一律丢弃；只信任当前用户不可写的 aws 可执行文件（含所有上级目录）。依赖 config 中 `ca_bundle` 的环境请改用 `AWS_CA_BUNDLE` 环境变量 |
@@ -294,6 +295,22 @@ Windows 使用 `install.ps1` 的同名参数（见上文"本地安装：Windows"
 | `settings.json` 的 `shellPath`（Windows） | 指向安装时使用的 Git Bash | 恢复安装前的原值 |
 
 修改 JSON 文件前会备份为 `*.pi-bedrock.bak`；JSON 不合法时拒绝修改。
+
+### 更新
+
+获取最新源码后重新运行安装器即可，过程是增量的：已安装的 Node.js、pi、MCP proxy、skills 会跳过，运维规则（`~/.pi/agent/AGENTS.md` 托管段落）、护栏扩展、包装器与 settings 会更新为新版本。请使用**与首次安装相同的参数**（例如首次用了 `--no-mcp`，更新时也要带上，否则会重新安装 MCP）。
+
+CloudShell / macOS / Linux：
+
+```bash
+# 源码目录还在：git -C pi-cli-on-aws pull；已删除则重新 clone
+git clone https://github.com/zhuangyq008/pi-cli-on-aws.git 2>/dev/null || git -C pi-cli-on-aws pull
+bash pi-cli-on-aws/install.sh
+```
+
+Windows（PowerShell）：重新下载 zip 并解压（同"本地安装：Windows"），然后运行 `powershell -ExecutionPolicy Bypass -File .\pi-cli-on-aws-main\install.ps1`。
+
+更新后需要**重新启动 pi**（已打开的会话仍使用旧规则）。可以运行 `pi-bedrock-doctor` 自检，或用 `grep -c 工具选择 ~/.pi/agent/AGENTS.md` 确认新规则已生效（输出 1）。
 
 ### 卸载
 
