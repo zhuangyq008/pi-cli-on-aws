@@ -6,7 +6,7 @@
 #   - 默认 shell 为 zsh；pi 的 bash 工具同样使用 bash 3.2（settings.json 的 shellPath）
 # 注意：会产生少量真实 Bedrock 调用与只读 AWS API 调用。
 # 用法: BASH32=/path/to/bash-3.2 bash tests/e2e/macos-like.sh   可选: KEEP_WORK=1
-#   获取 bash 3.2 的一种方式：docker 镜像 bash:3.2（见 README「开发与测试」）
+#   获取 bash 3.2 的一种方式：docker 镜像 bash:3.2（见 docs/development.md）
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
