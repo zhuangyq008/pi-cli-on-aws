@@ -37,6 +37,8 @@ interface Inspection {
   readonly rewrite?: string;
 }
 
+// 安装器复用的、当前用户可写的 Node.js / Python 目录（env 文件 PI_GUARD_RUNTIME_ROOTS，冒号分隔，仅 Linux / macOS）
+const RUNTIME_ROOTS: readonly string[] = (process.env.PI_GUARD_RUNTIME_ROOTS ?? "").split(":").filter((p) => p.startsWith("/") && p !== "/");
 const RUN_SCRIPT_TOOL = /(^|__)aws___run_script$/;
 const PRESIGNED_URL_TOOL = /(^|__)aws___get_presigned_url$/;
 const READ_TOOLS: ReadonlySet<string> = new Set(["read", "grep", "find", "ls"]);
@@ -233,7 +235,7 @@ function windowsShellTrust(cwd: string): WindowsShellTrust {
 
 function inspectBash(command: string, cwd: string): Inspection {
   const trust = windowsShellTrust(cwd);
-  const assessment = assessBashCommand(command, { readFile: readSmallFile, realpath: realpathOf, cwd, home, windowsGitRoot: trust.writableGitRoot });
+  const assessment = assessBashCommand(command, { readFile: readSmallFile, realpath: realpathOf, cwd, home, windowsGitRoot: trust.writableGitRoot, runtimeRoots: RUNTIME_ROOTS });
   const needsAws = assessment.awsLabels.length > 0 || assessment.strict !== undefined;
   const awsConfigWarnings = needsAws ? currentAwsConfigIssues() : [];
   const snapshot = existsSync(snapshotRunner.script) ? snapshotRunner : undefined;
@@ -258,7 +260,7 @@ function inspect(toolName: string, input: Record<string, unknown>, cwd: string):
   const path = asString(input.path);
   if (toolName === "write" || toolName === "edit") {
     const gitRoot = windowsShellTrust(cwd).writableGitRoot;
-    const hit = isProtectedPath(path, home, cwd, { agentDir, realpath: realpathOf, extraRoots: gitRoot ? [gitRoot] : [] });
+    const hit = isProtectedPath(path, home, cwd, { agentDir, realpath: realpathOf, extraRoots: [...(gitRoot ? [gitRoot] : []), ...RUNTIME_ROOTS] });
     return { ...PASS, reasons: hit ? [`修改受保护文件 ${path}`] : [], preview: path };
   }
   if (READ_TOOLS.has(toolName)) {

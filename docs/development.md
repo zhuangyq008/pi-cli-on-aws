@@ -26,11 +26,15 @@ Windows 端到端测试在干净的 Windows Server 2022（无 Git、无 AWS CLI�
 install.sh / uninstall.sh       入口
 lib/common.sh                   常量、日志、校验
 lib/config.sh                   env 文件、区域注入、托管段落（包装器只依赖此文件）
-lib/node.sh  lib/pi.sh          私有 Node 与 pi 安装
+lib/node.sh  lib/pi.sh          复用 / 私有 Node 与 pi 安装
 lib/region.sh                   Bedrock 源区域探测
-lib/mcp.sh  lib/mcp-runtime.sh  uv / MCP proxy 安装与 endpoint 选择
-lib/skills.sh                   官方 skills 与 AGENTS.md 规则
+lib/mcp.sh  lib/mcp-runtime.sh  uv / Python / MCP proxy 安装与 endpoint 选择
+lib/skills.sh                   内置 skills 安装与 AGENTS.md 规则
+lib/jobs.sh                     安装器后台任务（区域探测、MCP 代理与 Node / pi 并行）
+lib/bedrock-models.mjs          按区域筛选可用模型（进程内 SigV4 请求，失败时回退 aws CLI）
 lib/*.mjs                       settings.json / mcp.json 安全合并
+vendor/agent-toolkit-for-aws/   官方 skills 与规则（固定 commit，Apache-2.0；SOURCE 记录来源与内容哈希）
+scripts/sync-aws-skills.sh      维护者脚本：从上游固定 commit 同步 vendor/agent-toolkit-for-aws
 bin/pi  bin/aws-mcp-proxy       pi 包装器、MCP 启动器
 bin/pi-bedrock-doctor           自检
 extensions/aws-ops-guard/       写操作护栏（pi 扩展）：index.ts 入口；policy.ts 执行策略；
@@ -45,3 +49,13 @@ tests/                          bats、护栏单元测试、CloudShell / macOS �
 tests/windows/                  Windows 真机端到端（EC2 + SSM）
 tests/bench/                    MCP vs CLI benchmark（RPC 驱动 pi，采集 token / 耗时）
 ```
+
+## 升级内置 skills
+
+```bash
+bash scripts/sync-aws-skills.sh <40 位 commit SHA>   # 下载上游该 commit，替换 vendor/agent-toolkit-for-aws
+git diff --stat vendor/                              # 审阅内容变化后提交
+npx bats tests/skills.bats                           # 校验 SOURCE 中的内容哈希与 skill 数量
+```
+
+同步的是 `lib/skills.sh` 的 `PI_SKILLS_FULL` 集合；调整默认安装集合时修改 `PI_SKILLS_CORE`（并同步更新 `tests/skills.bats`、`tests/e2e/cloudshell-sim.sh` 中的数量与 `docs/installation.md`）。

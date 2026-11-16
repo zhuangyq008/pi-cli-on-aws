@@ -10,7 +10,7 @@
 - **CLI 优先，按需用 MCP**：例行查询用单条只读 `aws` 命令；跨区域 / 批量查询用 AWS MCP 的 `aws___run_script` 一次完成；官方运维 skills 按需加载。与"MCP + 每次先加载 skill"相比，平均 tokens **-64%**、耗时 **-42%**（[benchmark](docs/benchmark-mcp-vs-cli.md)）
 - **写操作护栏** `aws-ops-guard`：bash 默认不带 AWS 凭证；只读查询直接执行，写操作弹窗确认，非交互模式一律拒绝，所有决策写审计日志
 - **开箱即用**：自动选择有配额的 Bedrock 源区域、`/model` 只显示当前区域可用的模型、`pi-bedrock-doctor` 端到端自检
-- **可复现的供应链**：pi、Node.js、uv、MCP proxy（含全部依赖哈希）、skills 均固定版本并校验
+- **可复现的供应链**：pi、Node.js、uv、MCP proxy（含全部依赖哈希）固定版本并校验，skills 内置于仓库（固定 commit）；本机已有合适的 Node.js / uv / Python 时直接复用，安装通常在 20 秒内完成
 
 ## 快速开始
 
@@ -65,7 +65,7 @@ CloudShell ($HOME 持久化)
     ├── 模型：amazon-bedrock / global.moonshotai.kimi-k3.1 ──SigV4──▶ Bedrock Runtime（源区域可自动选择）
     ├── MCP：aws-mcp ── mcp-proxy-for-aws-cli（SigV4）──▶ AWS MCP Server（aws-mcp.<region>.api.aws）
     │        └── aws___run_script：沙箱 Python + call_boto3 ──▶ Cost Explorer / CloudWatch / Budgets / ...
-    ├── skills：~/.pi/agent/skills/aws-agent-toolkit（官方 skills，固定 commit）
+    ├── skills：~/.pi/agent/skills/aws-agent-toolkit（官方 skills，默认 core 9 个，--skills full 为 19 个）
     ├── 规则：~/.pi/agent/AGENTS.md（托管段落：中文运维规则 + 官方 aws-agent-rules）
     └── 扩展：~/.pi/agent/extensions/aws-ops-guard（写操作人工确认 + 审计日志）
 凭证：CloudShell 容器凭证端点（控制台登录身份）；本地为安装时选定的 profile——Bedrock、MCP、bash 中的 aws CLI 共用

@@ -84,7 +84,7 @@ function validRedirectTarget(target: string, options: ShellOptions): boolean {
   if (!/^(\/tmp\/)?[A-Za-z0-9_][A-Za-z0-9._-]*$/.test(target)) return false;
   const home = options.home ?? "/";
   const cwd = options.cwd ?? "/";
-  if (isProtectedPath(target, home, cwd)) return false;
+  if (isProtectedPath(target, home, cwd, { extraRoots: options.runtimeRoots })) return false;
   const abs = posix.resolve(cwd, target);
   const real = options.realpath?.(abs);
   return real === undefined || real === abs;

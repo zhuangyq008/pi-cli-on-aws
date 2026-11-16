@@ -78,9 +78,9 @@
 | 组件 | 版本 | 校验 |
 |---|---|---|
 | pi `@earendil-works/pi-coding-agent` | 1.5.2（固定） | npm 完整性校验；pi 发布 `npm-shrinkwrap.json` 锁定传递依赖；`--ignore-scripts` 不执行依赖的 install 脚本 |
-| Node.js | 24.22.2（固定，仅当系统 Node < 22.19 或位于 `$HOME` 时安装；Windows 始终安装私有 Node） | SHA256 内置在 `lib/node.sh`（Linux / macOS / Windows × x64 / arm64） |
-| uv | 0.13.7（固定） | SHA256 内置在 `lib/mcp.sh` |
+| Node.js | 24.22.2（固定，仅当 PATH 中没有 >= 22.19 的 Node 或使用 `--node private` 时安装；Windows 始终安装私有 Node） | SHA256 内置在 `lib/node.sh`（Linux / macOS / Windows × x64 / arm64）。复用当前用户可写的 Node（nvm / Homebrew 等）时，其目录加入护栏保护（`PI_GUARD_RUNTIME_ROOTS`，尽力而为的静态检查；强隔离用 `--node private --python managed`） |
+| uv | 0.13.7（固定，PATH 中已有 >= 0.5.0 的 uv 时复用；Windows 始终用固定版本） | SHA256 内置在 `lib/mcp.sh`；uv 只在安装时运行，复用本机 uv 时依赖同样以 `--require-hashes` 校验 |
 | Git for Windows（仅 Windows 且未安装时） | 2.56.1（固定） | SHA256 内置在 `install.ps1` |
 | AWS CLI v2（仅 Windows 且用户同意时） | 最新版 MSI | 校验 Amazon 的 Authenticode 签名 |
-| mcp-proxy-for-aws-cli | 1.8.0（固定） | `lib/mcp-proxy-requirements.txt` 锁定全部 81 个依赖的 SHA256，`--require-hashes` 安装；Python 3.12 由 uv 下载并校验 |
-| Agent Toolkit skills | commit `00840a0`（固定） | 仅复制白名单 skill 目录、删除符号链接；对内容清单做 SHA256 校验（`PI_AWS_SKILLS_SHA256`），不匹配则不安装 |
+| mcp-proxy-for-aws-cli | 1.8.0（固定） | `lib/mcp-proxy-requirements.txt` 锁定全部 81 个依赖的 SHA256，`--require-hashes` 安装；PATH 中有 Python 3.11–3.14 时复用（`--python managed` 改用 uv 下载并校验的 Python 3.12），复用当前用户可写的 Python（pyenv / Homebrew 等）时其目录加入护栏保护 |
+| Agent Toolkit skills | commit `00840a0`（固定，内置于 `vendor/agent-toolkit-for-aws`） | 由维护者用 `scripts/sync-aws-skills.sh` 同步并审阅后提交：仅复制选定的 skill 目录与规则文件、删除符号链接与可执行位；`SOURCE` 记录内容清单 SHA256，安装时重新计算并比对，不一致则不安装 skills 与官方规则。安装时只做本地复制，不联网 |

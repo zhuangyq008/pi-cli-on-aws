@@ -113,12 +113,21 @@ check_ops() {
   else
     ok "aws-ops-guard 已启用（模式: confirm；审计日志 $PI_CODING_AGENT_DIR/aws-ops-guard.log）"
   fi
+  # 复用的用户可写 Node / Python（nvm、Homebrew、pyenv 等）：护栏对写入这些目录的操作要求确认
+  [ -n "${PI_GUARD_RUNTIME_ROOTS:-}" ] && ok "护栏额外保护复用的运行时目录: ${PI_GUARD_RUNTIME_ROOTS//:/, }"
   count="$(find "$(skills_dir)" -name SKILL.md 2>/dev/null | wc -l | tr -d ' ')"
   if [ "$count" -gt 0 ]; then ok "AWS 运维 skills: $count 个"; else warn "未预装 AWS skills（模型仍可通过 aws___retrieve_skill 在线获取）"; fi
   if grep -qF "$AGENTS_MARKER_BEGIN" "$PI_CODING_AGENT_DIR/AGENTS.md" 2>/dev/null; then ok "运维规则已写入 AGENTS.md"; else warn "AGENTS.md 中没有运维规则段落"; fi
   if [ -z "${PI_AWS_MCP_PROXY_BIN:-}" ]; then warn "未安装 AWS MCP Server（安装时使用了 --no-mcp）"; return; fi
   local ops="${PI_OPS_AWS_REGION:-${AWS_REGION:-us-east-1}}" out
-  if [ -x "$PI_AWS_MCP_PROXY_BIN" ]; then ok "mcp-proxy-for-aws-cli 已安装"; else bad "未找到 $PI_AWS_MCP_PROXY_BIN"; fi
+  # venv 的解释器链接到创建它的 Python：复用的系统 Python 被升级 / 卸载后代理无法启动
+  if [ ! -x "$PI_AWS_MCP_PROXY_BIN" ]; then
+    bad "未找到 $PI_AWS_MCP_PROXY_BIN"
+  elif "$PI_AWS_MCP_PROXY_BIN" --help >/dev/null 2>&1; then
+    ok "mcp-proxy-for-aws-cli 已安装"
+  else
+    bad "mcp-proxy-for-aws-cli 无法启动（所用的 Python 可能已被升级或卸载），请重新运行 install.sh"
+  fi
   if grep -q "$PI_BEDROCK_HOME/bin/aws-mcp-proxy" "$PI_CODING_AGENT_DIR/mcp.json" 2>/dev/null; then
     ok "mcp.json 已配置 aws-mcp（endpoint aws-mcp.$(aws_mcp_endpoint_region "$ops").api.aws，默认运维区域 ${ops}）"
   else

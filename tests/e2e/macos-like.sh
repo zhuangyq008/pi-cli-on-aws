@@ -65,7 +65,7 @@ if (cd "$PROJECT" && "${MAC_ENV[@]}" "$BASH32" "$REPO_ROOT/install.sh") >"$WORK/
 sed 's/^/    | /' "$WORK/install.log"
 check "从 AWS CLI 配置读取默认区域 ap-northeast-1" grep -q "使用 AWS CLI 配置中的默认区域 ap-northeast-1" "$WORK/install.log"
 check "PATH 写入 ~/.zshrc" grep -q '>>> pi-bedrock >>>' "$SIM_HOME/.zshrc"
-check "skills 内容哈希校验通过（无 sha256sum 时结果一致）" bash -c "find '$SIM_HOME/.pi/agent/skills' -name SKILL.md | grep -q ."
+check "预装默认 core skills（9 个）" bash -c "test \"\$(find '$SIM_HOME/.pi/agent/skills' -name SKILL.md | wc -l | tr -d ' ')\" -eq 9"
 # 让 pi 的 bash 工具也使用 bash 3.2（模拟 macOS 的 /bin/bash）
 node -e 'const f=process.argv[1],fs=require("fs");const s=JSON.parse(fs.readFileSync(f));fs.writeFileSync(f,JSON.stringify({...s,shellPath:process.argv[2]},null,2))' \
   "$SIM_HOME/.pi/agent/settings.json" "$BASH32"

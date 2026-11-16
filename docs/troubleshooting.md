@@ -19,4 +19,5 @@
 | Windows：`pi` 不是可识别的命令 | 安装后需重新打开 PowerShell 窗口使用户 PATH 生效；或直接运行 `%USERPROFILE%\.local\bin\pi.cmd` |
 | Windows：脚本被执行策略阻止 | 用 `powershell -ExecutionPolicy Bypass -File install.ps1` 运行（只对本次生效，不修改系统策略） |
 | Windows：安装 Git for Windows / AWS CLI 失败 | 企业环境可能禁止安装软件：手动安装后重新运行，或用 `-GitBash` 指定已有的 `bin\bash.exe` |
-| skills 提示"内容校验失败" | 上游内容与固定哈希不一致，已跳过安装（不影响其他功能）；审阅后可设置 `PI_AWS_SKILLS_SHA256` 重新安装 |
+| 需要 core 之外的 skills（安全评估、韧性等） | 重新运行 `install.sh --skills full`，或让模型通过 `aws___retrieve_skill` 在线获取 |
+| `pi` 提示"未找到 Node.js"，或 doctor 提示 mcp-proxy 无法启动 | 复用的本机 Node.js / Python 已被卸载或升级到其他位置：重新运行 `install.sh`（或用 `--node private --python managed` 改用私有版本，不再受本机变化影响） |

@@ -3,7 +3,7 @@
 # CloudShell 只持久化 ${HOME}（1 GB），因此私有 Node 安装在 $PI_BEDROCK_HOME/node 下；
 # 结果写入全局变量 PI_BEDROCK_NODE_BIN（包含 node 与 npm 的目录；Windows 上为 node.exe 所在的发行包根目录）。
 
-# PI_BEDROCK_NODE_MODE: auto（系统 Node 满足版本则复用，否则安装私有 Node）| private | system
+# PI_BEDROCK_NODE_MODE: auto（PATH 中的 Node 满足版本则复用，否则安装私有 Node；Windows 始终私有）| private | system
 : "${PI_BEDROCK_NODE_MODE:=auto}"
 
 _system_node_ok() {
@@ -27,26 +27,49 @@ _private_node_ok() {
   [ -x "$node" ] && [ "$("$node" -v 2>/dev/null | tr -d '\r')" = "v$PI_NODE_VERSION" ]
 }
 
+# 复用 PATH 中的 Node.js。版本管理器的 shim（volta / asdf / mise）用 process.execPath 解析出真实路径；
+# 否则使用 PATH 中的路径（如 Homebrew 的 /opt/homebrew/bin，升级后不变）。成功时设置 PI_BEDROCK_NODE_BIN
+_use_system_node() {
+  local cmd real dir home_real
+  cmd="$(command -v node)" || return 1
+  real="$("$cmd" -p process.execPath 2>/dev/null | tr -d '\r')"
+  [ -n "$real" ] && [ -x "$real" ] || return 1
+  real="$(resolve_path "$real")"
+  # 在 pi 启动的 shell 中重新安装时，PATH 最前面是本工具的私有 Node：交给私有 Node 的逻辑处理（不能复用后再删除）
+  home_real="$(resolve_path "$PI_BEDROCK_HOME" 2>/dev/null || true)"
+  case "$real" in "${home_real:-$PI_BEDROCK_HOME}"/* | "$PI_BEDROCK_HOME"/*) return 1 ;; esac
+  if [ "$(resolve_path "$cmd")" = "$real" ]; then dir="$(dirname "$cmd")"; else dir="$(dirname "$real")"; fi
+  if ! [[ "$dir" =~ ^/[A-Za-z0-9._/@+-]+$ ]]; then
+    log_info "系统 Node.js 路径包含不支持的字符（${dir}），改用私有 Node.js"
+    return 1
+  fi
+  if [ ! -x "$dir/npm" ]; then
+    log_info "$dir 下没有 npm，改用私有 Node.js"
+    return 1
+  fi
+  PI_BEDROCK_NODE_BIN="$dir"
+  # PATH 中的目录（可能只是指向系统 Node 的符号链接所在处）与真实路径都不可写，才视为系统 Node
+  if path_immutable "$real" && path_immutable "$dir/node"; then
+    log_info "复用系统 Node.js $("$real" -v)（${dir}）"
+  else
+    # pi 以这个 Node 运行并持有 AWS 凭证：其安装目录加入护栏保护（agent 写入需人工确认）
+    add_runtime_root "$(dirname "$(dirname "$real")")"
+    add_runtime_root "$dir"
+    add_runtime_alias "$real"
+    log_info "复用 Node.js $("$real" -v)（${dir}，当前用户可写，已加入 aws-ops-guard 保护目录；需要隔离时使用 --node private）"
+  fi
+  # 之前安装过的私有 Node 不再使用，释放空间（CloudShell $HOME 仅 1 GB）
+  rm -rf "${PI_BEDROCK_HOME:?}/node"
+}
+
 ensure_node() {
   # Windows：系统 Node 通常位于含空格的 Program Files 下，且无法可靠判断是否可被改写，auto 模式下始终使用私有 Node
   local mode="$PI_BEDROCK_NODE_MODE"
   [ "$mode" = auto ] && is_windows && mode=private
   case "$mode" in
     auto | system)
-      if _system_node_ok; then
-        local sys_bin
-        sys_bin="$(dirname "$(resolve_path "$(command -v node)")")"
-        # 路径需能安全写入 env 文件；auto 模式下只复用当前用户不可改写的 Node（pi 以它运行并持有凭证，
-        # 可写位置如 Homebrew 的 /opt/homebrew、nvm 的 ~/.nvm 可被 agent 替换）
-        if [[ "$sys_bin" =~ ^/[A-Za-z0-9._/@+-]+$ ]] && { [ "$PI_BEDROCK_NODE_MODE" = system ] || path_immutable "$sys_bin/node"; }; then
-          PI_BEDROCK_NODE_BIN="$sys_bin"
-          log_info "复用系统 Node.js $(node -v)（${PI_BEDROCK_NODE_BIN}）"
-          return 0
-        fi
-        [ "$PI_BEDROCK_NODE_MODE" = system ] && die "系统 Node.js 路径包含不支持的字符: $sys_bin"
-        log_info "检测到 $sys_bin 下的 Node.js（当前用户可写，如 Homebrew / nvm），改用私有 Node.js"
-      fi
-      [ "$PI_BEDROCK_NODE_MODE" = system ] && die "系统 Node.js 不满足 >= ${PI_MIN_NODE}（当前: $(node -v 2>/dev/null || echo 无)）"
+      if _system_node_ok && _use_system_node; then return 0; fi
+      [ "$PI_BEDROCK_NODE_MODE" = system ] && die "系统 Node.js 不可用（需要 >= ${PI_MIN_NODE} 且同目录有 npm；当前: $(node -v 2>/dev/null || echo 无)）"
       ;;
     private) ;;
     *) die "非法的 PI_BEDROCK_NODE_MODE: ${PI_BEDROCK_NODE_MODE}（可选 auto|private|system）" ;;

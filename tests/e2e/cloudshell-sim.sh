@@ -94,7 +94,7 @@ check "护栏与运行时文件为只读" bash -c "[ ! -w '$SIM_HOME/.pi/agent/e
 check "mcp.json 中配置了 aws-mcp" grep -q '"aws-mcp"' "$SIM_HOME/.pi/agent/mcp.json"
 check "aws-ops-guard 扩展已安装" test -f "$SIM_HOME/.pi/agent/extensions/aws-ops-guard/index.ts"
 SKILLS="$(find "$SIM_HOME/.pi/agent/skills" -name SKILL.md | wc -l)"
-check "预装 AWS 运维 skills（$SKILLS 个）" test "$SKILLS" -gt 10
+check "预装 AWS 运维 skills（默认 core，$SKILLS 个）" test "$SKILLS" -eq 9
 check "AGENTS.md 写入运维规则" grep -q '先查后改' "$SIM_HOME/.pi/agent/AGENTS.md"
 check "enabledModels 只包含当前区域可用模型（含默认模型）" node -e '
   const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));

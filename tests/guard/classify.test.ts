@@ -569,3 +569,89 @@ test("通配符 / 变量拼出的隐藏目录路径需要确认（门禁发现�
     assert.deepEqual(assess(cmd).guardFindings, [], cmd);
   }
 });
+
+test("复用的用户可写 Node / Python 目录：bash 写入与版本管理器需要确认，只读与无关命令不受影响", () => {
+  const home = "/home/me";
+  const runtimeRoots = ["/home/me/.nvm/versions/node/v24.1.0", "/opt/homebrew/bin"];
+  const guard = (cmd: string, cwd = "/home/me/work") => assessBashCommand(cmd, { home, cwd, runtimeRoots }).guardFindings;
+  const mustConfirm = [
+    "cp evil ~/.nvm/versions/node/v24.1.0/bin/node",
+    "cp evil $HOME/.nvm/versions/node/v24.1.0/bin/node",
+    "echo x > /opt/homebrew/bin/node",
+    "echo x >/opt/homebrew/bin/node",
+    "ln -sf /tmp/x /opt/homebrew/bin/node",
+    "cat evil | tee /opt/homebrew/bin/npm",
+    // 审查中发现的绕过写法
+    "cd /opt/homebrew && cp /tmp/evil bin/node",
+    "cd ~/.nvm/versions/node && cp evil v24.1.0/bin/node",
+    "cp /tmp/evil /opt/homebrew/b*/node",
+    "D=/opt/homebrew; cp /tmp/evil $D/bin/node",
+    "export D=/opt/homebrew && cp /tmp/evil ${D}/bin/node",
+    "sed --in-place s/a/b/ /opt/homebrew/bin/npm",
+    "perl -pi -e s/a/b/ /opt/homebrew/bin/npm",
+    "python3 -c \"open('/opt/homebrew/bin/node','wb').write(b'x')\"",
+    "sudo cp evil /opt/homebrew/bin/node",
+    "dd if=/tmp/evil of=/opt/homebrew/bin/node",
+    // 版本管理器
+    "nvm uninstall 24.1.0",
+    "brew upgrade node",
+    "brew --quiet upgrade node",
+    "brew bundle",
+    "/opt/homebrew/bin/brew uninstall python@3.12",
+    "pyenv uninstall 3.12.4",
+    "n 22",
+  ];
+  for (const cmd of mustConfirm) assert.ok(guard(cmd).length > 0, cmd);
+  assert.ok(guard("cp evil node", "/home/me/.nvm/versions/node/v24.1.0/bin").length > 0, "cwd 位于运行时目录内");
+  const noPrompt = [
+    "ls ~/.nvm/versions/node/v24.1.0/bin",
+    "ls /opt/homebrew/bin 2>/dev/null",
+    "ls ~/.nvm/versions/node/v24.1.0/bin 2>&1 | head",
+    "export PATH=/opt/homebrew/bin:$PATH && curl -s https://example.com",
+    "which node > /tmp/x; echo /opt/homebrew/bin",
+    "git commit -m 'brew install x'",
+    "head -n 5 notes.txt",
+    "tail -n 20 app.log",
+    "node -v",
+    "cp a b",
+    "mkdir -p out && echo ok > out/x",
+    "/opt/homebrew/bin/jq . x.json > report.json",
+    "brew list",
+    "brew info node",
+    "cd /opt/homebrew && ls bin",
+  ];
+  for (const cmd of noPrompt) assert.deepEqual(guard(cmd), [], cmd);
+  // 未复用可写运行时（runtimeRoots 为空）时不检查
+  assert.deepEqual(assessBashCommand("brew upgrade node", { home, cwd: "/home/me" }).guardFindings, []);
+});
+
+test("复用的用户可写 Node / Python 目录：write / edit 工具的目标位于其中时受保护", () => {
+  const extraRoots = ["/home/me/.pyenv/versions/3.12.4"];
+  assert.equal(isProtectedPath("~/.pyenv/versions/3.12.4/bin/python3.12", "/home/me", "/tmp", { extraRoots }), true);
+  assert.equal(isProtectedPath("~/.pyenv/versions/3.11.0/bin/python3.11", "/home/me", "/tmp", { extraRoots }), false);
+});
+
+test("复用的运行时目录（安全审查）：经符号链接别名写入、find -delete、eval、git -C、编辑器、awk、脚本参数都需要确认", () => {
+  const home = "/home/me";
+  const root = "/opt/homebrew/Cellar/node/22.1.0";
+  const links: Record<string, string> = { "/opt/homebrew/opt/node": root, "/opt/homebrew/opt": "/opt/homebrew/opt", "/opt/homebrew": "/opt/homebrew", "/opt": "/opt" };
+  const realpath = (abs: string): string | undefined => links[abs];
+  const guard = (cmd: string) => assessBashCommand(cmd, { home, cwd: "/home/me/work", runtimeRoots: [root, "/opt/homebrew/bin"], realpath }).guardFindings;
+  for (const cmd of [
+    "cp /tmp/x /opt/homebrew/opt/node/bin/node",
+    "sed -i s/a/b/ /opt/homebrew/opt/node/lib/node_modules/npm/bin/npm-cli.js",
+    "find /opt/homebrew/bin -name node -delete",
+    "find /opt/homebrew/bin -name node -exec cp /tmp/x {} ;",
+    "eval \"cp /tmp/x /opt/homebrew/bin/node\"",
+    "bash -c \"cp /tmp/x /opt/homebrew/bin/node\"",
+    "awk 'BEGIN{print 1 > \"/opt/homebrew/bin/node\"}'",
+    "git -C /opt/homebrew/Cellar/node/22.1.0 checkout .",
+    "vim /opt/homebrew/bin/npm",
+    "python3 evil.py /opt/homebrew/bin/node",
+  ]) {
+    assert.ok(guard(cmd).length > 0, cmd);
+  }
+  for (const cmd of ["ls /opt/homebrew/opt/node/bin", "find /opt/homebrew/bin -name node", "cat /opt/homebrew/opt/node/package.json", "grep -r foo /opt/homebrew/bin"]) {
+    assert.deepEqual(guard(cmd), [], cmd);
+  }
+});

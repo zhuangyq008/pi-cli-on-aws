@@ -9,12 +9,11 @@ umask 077   # 新建的配置、日志、凭证相关文件仅当前用户可读
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # 记录用户覆盖的版本 / 完整性 / 下载地址（加载默认值之前），安装时醒目提示
 SECURITY_OVERRIDES=()
-for _v in PI_VERSION PI_PACKAGE PI_PACKAGE_INTEGRITY PI_NODE_VERSION PI_NODE_SHA256 PI_NODE_DIST_BASE PI_UV_VERSION PI_UV_DOWNLOAD_BASE \
-  PI_AWS_TOOLKIT_REPO PI_AWS_TOOLKIT_REF PI_AWS_TOOLKIT_TARBALL_URL PI_AWS_SKILLS PI_AWS_SKILLS_SHA256; do
+for _v in PI_VERSION PI_PACKAGE PI_PACKAGE_INTEGRITY PI_NODE_VERSION PI_NODE_SHA256 PI_NODE_DIST_BASE PI_UV_VERSION PI_UV_DOWNLOAD_BASE; do
   [ -n "${!_v:-}" ] && SECURITY_OVERRIDES+=("$_v=${!_v}")
 done
 unset _v
-for _lib in common config node pi region mcp mcp-runtime skills models credentials; do
+for _lib in common config node pi region mcp mcp-runtime skills models credentials jobs; do
   [ -f "$SCRIPT_DIR/lib/$_lib.sh" ] || { echo "ERROR: 缺少 $SCRIPT_DIR/lib/$_lib.sh，请使用完整的 pi-cli-bedrock 目录运行" >&2; exit 1; }
   # shellcheck source=/dev/null
   . "$SCRIPT_DIR/lib/$_lib.sh"
@@ -23,7 +22,7 @@ unset _lib
 # shellcheck disable=SC2034 # 供 lib/mcp.sh 使用（依赖锁文件位置）
 PI_BEDROCK_LIB_SRC="$SCRIPT_DIR/lib"
 INSTALL_MARKER=".pi-bedrock-managed"
-GUARD_FILES="index.ts classify.ts policy.ts shell.ts strict.ts awscli.ts script.ts ops.ts paths.ts redact.ts awsconfig.mjs awsconfig.d.mts snapshot.mjs"
+GUARD_FILES="index.ts classify.ts policy.ts shell.ts strict.ts awscli.ts script.ts ops.ts paths.ts redact.ts runtime.ts awsconfig.mjs awsconfig.d.mts snapshot.mjs"
 
 MIN_FREE_MB_BASE=350   # Node + pi
 MIN_FREE_MB_MCP=600    # + uv、托管 Python、mcp-proxy-for-aws-cli
@@ -31,7 +30,6 @@ OPT_REGION=""
 OPT_PROBE=1
 OPT_BASHRC=1
 OPT_MCP=1
-OPT_SKILLS=1
 OPT_FILTER_MODELS=1
 
 usage() {
@@ -44,9 +42,13 @@ usage() {
   --model ID          默认模型（默认: ${PI_BEDROCK_MODEL}）
   --thinking LEVEL    默认思考等级 off|minimal|low|medium|high|xhigh|max（默认: ${PI_BEDROCK_THINKING}）
   --pi-version VER    pi 版本（默认: ${PI_VERSION}，可设为 latest）
-  --node MODE         auto|private|system（默认: ${PI_BEDROCK_NODE_MODE}）
-  --no-mcp            不安装 AWS MCP Server（节省约 220 MB）
-  --no-skills         不预装 AWS 运维 skills 与规则文件
+  --node MODE         auto|private|system（默认: ${PI_BEDROCK_NODE_MODE}；auto 复用 PATH 中 >= ${PI_MIN_NODE} 的 Node.js）
+  --python MODE       MCP 代理的 Python：auto|managed|system（默认: ${PI_MCP_PYTHON_MODE}；auto 复用 PATH 中的 3.11–3.14）
+  --no-mcp            不安装 AWS MCP Server（节省约 120–230 MB）
+  --skills SET        预装的 AWS 运维 skills：core|full|none（默认: ${PI_BEDROCK_SKILLS}）
+                        core  成本、可观测、排障、IAM、告警 / CloudTrail / 网络监控（9 个）
+                        full  另含安全、Well-Architected 评审、韧性（19 个）
+                        none  不装 skills 与规则文件（同 --no-skills）
   --all-models        /model 显示 pi 内置的全部 Bedrock 模型（默认只启用当前区域可用的模型）
   --no-bashrc         不修改 ~/.bashrc
   -h, --help          显示帮助
@@ -66,9 +68,11 @@ parse_args() {
       --thinking) PI_BEDROCK_THINKING="${2:?--thinking 需要参数}"; shift 2 ;;
       --pi-version) PI_VERSION="${2:?--pi-version 需要参数}"; shift 2 ;;
       --node) PI_BEDROCK_NODE_MODE="${2:?--node 需要参数}"; shift 2 ;;
+      --python) PI_MCP_PYTHON_MODE="${2:?--python 需要参数}"; shift 2 ;;
       --no-bashrc) OPT_BASHRC=0; shift ;;
       --no-mcp) OPT_MCP=0; shift ;;
-      --no-skills) OPT_SKILLS=0; shift ;;
+      --skills) PI_BEDROCK_SKILLS="${2:?--skills 需要参数}"; shift 2 ;;
+      --no-skills) PI_BEDROCK_SKILLS=none; shift ;;
       --all-models) OPT_FILTER_MODELS=0; shift ;;
       -h | --help) usage; exit 0 ;;
       *) usage >&2; die "未知参数: $1" ;;
@@ -81,6 +85,9 @@ validate_inputs() {
   is_valid_model_id "$PI_BEDROCK_MODEL" || die "非法模型 ID: $PI_BEDROCK_MODEL"
   is_valid_thinking "$PI_BEDROCK_THINKING" || die "非法思考等级: $PI_BEDROCK_THINKING"
   is_valid_pi_version "$PI_VERSION" || die "非法 pi 版本: $PI_VERSION"
+  is_valid_skills_profile "$PI_BEDROCK_SKILLS" || die "非法的 --skills: ${PI_BEDROCK_SKILLS}（可选 core|full|none）"
+  case "$PI_BEDROCK_NODE_MODE" in auto | private | system) ;; *) die "非法的 --node: ${PI_BEDROCK_NODE_MODE}（可选 auto|private|system）" ;; esac
+  case "$PI_MCP_PYTHON_MODE" in auto | managed | system) ;; *) die "非法的 --python: ${PI_MCP_PYTHON_MODE}（可选 auto|managed|system）" ;; esac
   local p
   for p in "$PI_BEDROCK_HOME" "$PI_BIN_DIR" "$PI_CODING_AGENT_DIR"; do
     is_valid_install_path "$p" || die "路径包含不支持的字符（仅允许字母数字 ._/@+-）: ${p}。可设置 PI_BEDROCK_HOME / PI_BIN_DIR / PI_CODING_AGENT_DIR 指定其他目录"
@@ -250,6 +257,7 @@ write_configuration() {
   )
   [ -n "$region" ] && entries+=("PI_BEDROCK_REGION=$region")
   [ "$OPT_MCP" = 1 ] && entries+=("PI_AWS_MCP_PROXY_BIN=$PI_AWS_MCP_PROXY_BIN")
+  [ -n "${PI_GUARD_RUNTIME_ROOTS:-}" ] && entries+=("PI_GUARD_RUNTIME_ROOTS=$PI_GUARD_RUNTIME_ROOTS")
   [ -n "${PI_DEFAULT_AWS_REGION:-}" ] && entries+=("PI_DEFAULT_AWS_REGION=$PI_DEFAULT_AWS_REGION")
   [ -n "${PI_AWS_PROFILE:-}" ] && entries+=("PI_AWS_PROFILE=$PI_AWS_PROFILE")
   write_env_file "$PI_BEDROCK_HOME/env" "${entries[@]}"
@@ -273,9 +281,9 @@ write_configuration() {
     remove_mcp_config "$PI_BEDROCK_NODE_BIN/node" "$PI_BEDROCK_HOME/lib" "$PI_CODING_AGENT_DIR/mcp.json" "$launcher"
     rm -rf "$(uv_dir)"
   fi
-  if [ "$OPT_SKILLS" = 1 ]; then
-    install_aws_skills
-    install_agent_rules "$SCRIPT_DIR/templates/ops-rules.md"
+  if [ "$PI_BEDROCK_SKILLS" != none ]; then
+    install_aws_skills "$SCRIPT_DIR/$PI_SKILLS_VENDOR_REL"
+    install_agent_rules "$SCRIPT_DIR/templates/ops-rules.md" "$SCRIPT_DIR/$PI_SKILLS_VENDOR_REL"
     log_info "已写入运维规则到 $PI_CODING_AGENT_DIR/AGENTS.md（托管段落）"
   else
     remove_aws_skills
@@ -310,7 +318,7 @@ $(printf '%s' "${_C_GRN}")安装完成$(printf '%s' "${_C_OFF}")
   默认模型      $PI_BEDROCK_PROVIDER / $PI_BEDROCK_MODEL
   Bedrock 区域  ${region:-跟随当前 AWS 区域（${ops_region}）}
   AWS MCP       $([ "$OPT_MCP" = 1 ] && echo "aws-mcp（默认运维区域 = 当前 AWS 区域 ${ops_region}）" || echo "未安装")
-  运维 skills   $(if [ "$OPT_SKILLS" = 1 ]; then skills_dir; else echo "未安装"; fi)
+  运维 skills   $(if [ "$PI_BEDROCK_SKILLS" != none ]; then printf '%s（%s，%s 个）' "$(skills_dir)" "$PI_BEDROCK_SKILLS" "$(find "$(skills_dir)" -name SKILL.md 2>/dev/null | wc -l | tr -d ' ')"; else echo "未安装"; fi)
   写操作护栏    aws-ops-guard（写操作逐次人工确认；/aws-guard 查看或切换模式）
   配置          $PI_BEDROCK_HOME/env, $PI_CODING_AGENT_DIR/{settings,mcp}.json
 
@@ -323,6 +331,15 @@ $(printf '%s' "${_C_GRN}")安装完成$(printf '%s' "${_C_OFF}")
 EOF
 }
 
+# 等待后台的 MCP 代理安装，并合并它需要加入护栏保护的 Python 目录
+join_mcp_install() {
+  bg_wait mcp "等待后台任务：AWS MCP 代理安装…" || die "AWS MCP 代理安装失败（见上方输出；可使用 --no-mcp 跳过 MCP）"
+  local root roots
+  roots="$(bg_output mcp)"
+  local IFS=:
+  for root in $roots; do add_runtime_root "$root"; done
+}
+
 main() {
   parse_args "$@"
   validate_inputs
@@ -330,18 +347,26 @@ main() {
   mark_install_home
   ensure_aws_credentials
   detect_default_region
+  # 区域探测（只需 aws CLI）与 MCP 代理安装（uv / Python）与 Node.js / pi 互不依赖，放到后台并行
+  trap bg_cleanup EXIT
+  PI_GUARD_RUNTIME_ROOTS=""
+  PI_AWS_MCP_PROXY_BIN=""
+  bg_start region resolve_bedrock_region
+  if [ "$OPT_MCP" = 1 ]; then
+    PI_AWS_MCP_PROXY_BIN="$(mcp_proxy_bin)"
+    bg_start mcp install_mcp_stack
+  fi
+  log_info "后台并行：Bedrock 区域探测$([ "$OPT_MCP" = 1 ] && printf '、AWS MCP 代理安装')（完成后显示日志）"
   ensure_node
   install_pi
-  if [ "$OPT_MCP" = 1 ]; then
-    ensure_uv
-    install_mcp_proxy
-  fi
   local region
-  region="$(resolve_bedrock_region)"
+  bg_wait region "等待后台任务：Bedrock 区域探测…" || die "Bedrock 区域探测失败（见上方输出）"
+  region="$(bg_output region)"
   PI_ENABLED_MODELS_JSON=""
   if [ "$OPT_FILTER_MODELS" = 1 ]; then
     configure_model_list "${region:-${AWS_REGION:-${AWS_DEFAULT_REGION:-${PI_DEFAULT_AWS_REGION:-us-east-1}}}}" "$SCRIPT_DIR/lib"
   fi
+  [ "$OPT_MCP" = 1 ] && join_mcp_install
   install_runtime_files
   write_configuration "$region"
   smoke_test

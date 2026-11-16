@@ -1,0 +1,5 @@
+# 由 scripts/sync-aws-skills.sh 生成，请勿手工编辑。MANIFEST 为 skills/ 与 rules/ 的内容清单哈希（见 lib/skills.sh）。
+REPO=aws/agent-toolkit-for-aws
+REF=00840a095dcc53242dcb19402e7140fa896d2d46
+SKILLS=core-skills/aws-billing-and-cost-management core-skills/aws-observability core-skills/aws-investigation core-skills/aws-iam specialized-skills/operations-skills core-skills/aws-security core-skills/aws-well-architected-review specialized-skills/resilience-skills
+MANIFEST=9ba752a87eb88a878f1c9ffa2b963e76efa0870476418b2087f0d063eb8a8f65

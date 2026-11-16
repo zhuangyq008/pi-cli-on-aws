@@ -41,3 +41,19 @@ teardown() { teardown_sandbox; }
   [ "$status" -ne 0 ]
   [[ "$output" == *"完整的 pi-cli-bedrock 目录"* ]]
 }
+
+@test "install.sh 拒绝非法的 --skills / --node / --python，且不写任何文件" {
+  run bash "$REPO_ROOT/install.sh" --skills all
+  [ "$status" -ne 0 ]; [[ "$output" == *"非法的 --skills"* ]]
+  run bash "$REPO_ROOT/install.sh" --node nvm
+  [ "$status" -ne 0 ]; [[ "$output" == *"非法的 --node"* ]]
+  run bash "$REPO_ROOT/install.sh" --python conda
+  [ "$status" -ne 0 ]; [[ "$output" == *"非法的 --python"* ]]
+  [ -z "$(ls -A "$HOME")" ]
+}
+
+@test "install.sh --help 列出 --skills 与 --python" {
+  run bash "$REPO_ROOT/install.sh" --help
+  [[ "$output" == *"--skills SET"* ]]
+  [[ "$output" == *"--python MODE"* ]]
+}

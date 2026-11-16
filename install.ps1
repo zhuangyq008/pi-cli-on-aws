@@ -24,6 +24,7 @@ param(
   [ValidateSet('off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max')][string]$Thinking,
   [switch]$NoMcp,
   [switch]$NoSkills,
+  [ValidateSet('core', 'full', 'none')][string]$Skills,
   [switch]$AllModels,
   # 指定 Git Bash（bin\bash.exe）路径；默认自动查找
   [string]$GitBash,
@@ -261,12 +262,14 @@ function Invoke-Bash([string]$Bash, [string[]]$Arguments) {
 
 function ConvertTo-BashArgs {
   $list = New-Object System.Collections.Generic.List[string]
+  if ($NoSkills -and $Skills) { throw '-NoSkills 与 -Skills 不能同时使用' }
   if ($Region) { $list.Add('--region'); $list.Add($Region) }
   if ($NoProbe) { $list.Add('--no-probe') }
   if ($Model) { $list.Add('--model'); $list.Add($Model) }
   if ($Thinking) { $list.Add('--thinking'); $list.Add($Thinking) }
   if ($NoMcp) { $list.Add('--no-mcp') }
   if ($NoSkills) { $list.Add('--no-skills') }
+  if ($Skills) { $list.Add('--skills'); $list.Add($Skills) }
   if ($AllModels) { $list.Add('--all-models') }
   foreach ($a in $list) { if ($a -notmatch '^[A-Za-z0-9._:/=-]+$') { throw "非法参数: $a" } }
   for ($i = 0; $i -lt $list.Count; $i += 1) {

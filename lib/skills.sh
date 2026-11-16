@@ -1,16 +1,17 @@
 # shellcheck shell=bash
-# 安装 Agent Toolkit for AWS 的运维相关 skills（固定 commit），并把运维规则写入 pi 的全局 AGENTS.md 托管段落。
-# skills 目录：$PI_CODING_AGENT_DIR/skills/aws-agent-toolkit（含 .pi-bedrock-managed 标记，卸载时整体删除）
+# 安装内置的 Agent Toolkit for AWS 运维 skills，并把运维规则写入 pi 的全局 AGENTS.md 托管段落。
+# skills 内置在本仓库的 vendor/agent-toolkit-for-aws（由 scripts/sync-aws-skills.sh 从固定 commit 同步，Apache-2.0），
+# 安装时不联网。安装位置：$PI_CODING_AGENT_DIR/skills/aws-agent-toolkit（含 .pi-bedrock-managed 标记，卸载时整体删除）
 
-: "${PI_AWS_TOOLKIT_REPO:=aws/agent-toolkit-for-aws}"
-: "${PI_AWS_TOOLKIT_REF:=00840a095dcc53242dcb19402e7140fa896d2d46}"
-: "${PI_AWS_TOOLKIT_TARBALL_URL:=https://codeload.github.com/$PI_AWS_TOOLKIT_REPO/tar.gz/$PI_AWS_TOOLKIT_REF}"
-: "${PI_AWS_SKILLS:=core-skills/aws-billing-and-cost-management core-skills/aws-observability core-skills/aws-investigation core-skills/aws-security core-skills/aws-iam core-skills/aws-well-architected-review specialized-skills/operations-skills specialized-skills/resilience-skills}"
+# shellcheck disable=SC2034 # 供 install.sh 与 scripts/sync-aws-skills.sh 使用
+PI_SKILLS_VENDOR_REL="vendor/agent-toolkit-for-aws"
 
-# 固定 ref + 默认 skill 列表对应的内容清单哈希（见 _skills_manifest）。修改 ref 或列表时需同时更新，
-# 或在安装时设置 PI_AWS_SKILLS_SHA256=<新哈希>（校验失败的提示中会给出实际值）；设为 skip 可跳过校验（不推荐）。
-: "${PI_AWS_SKILLS_SHA256:=5407d462366c884b5a1392a9daa3185bca51b5e2b00c39eebd6aa6d1dbd6ef4d}"
-MAX_RULES_BYTES=65536
+# core：日常运维（成本、可观测、排障、IAM、告警 / CloudTrail / 网络监控）。每个 skill 的描述都会进入每轮请求的
+# system prompt，因此默认只装 core；full 另含安全评估、Well-Architected 评审与韧性（Resilience Hub / ARC / FIS）。
+# 其余 skill 可由模型通过 AWS MCP 的 aws___retrieve_skill 在线获取。
+PI_SKILLS_CORE="core-skills/aws-billing-and-cost-management core-skills/aws-observability core-skills/aws-investigation core-skills/aws-iam specialized-skills/operations-skills"
+PI_SKILLS_FULL="$PI_SKILLS_CORE core-skills/aws-security core-skills/aws-well-architected-review specialized-skills/resilience-skills"
+: "${PI_BEDROCK_SKILLS:=core}"   # core | full | none（install.sh --skills）
 
 AGENTS_MARKER_BEGIN="<!-- >>> pi-bedrock >>> -->"
 AGENTS_MARKER_END="<!-- <<< pi-bedrock <<< -->"
@@ -18,84 +19,71 @@ SKILLS_MARKER=".pi-bedrock-managed"
 
 skills_dir() { printf '%s/skills/aws-agent-toolkit' "$PI_CODING_AGENT_DIR"; }
 
-_skills_stamp() { printf '%s %s' "$PI_AWS_TOOLKIT_REF" "$PI_AWS_SKILLS"; }
+is_valid_skills_profile() { case "${1:-}" in core | full | none) return 0 ;; *) return 1 ;; esac; }
 
-# 内容清单哈希：对 skills 中每个文件（按路径排序）的 sha256 与规则文件的 sha256 再做一次 sha256
-_skills_manifest() {
-  local stage="$1" rules="$2"
-  {
-    # 输出格式与 GNU `sha256sum` 一致（"<hash>  ./path"），保证各平台计算结果相同
-    (cd "$stage" && find . -type f ! -name "$SKILLS_MARKER" -print0 | LC_ALL=C sort -z |
-      while IFS= read -r -d '' f; do printf '%s  %s\n' "$(sha256_of "$f")" "$f"; done)
-    if [ -f "$rules" ]; then printf 'rules  %s\n' "$(sha256_of "$rules")"; fi
-  } | sha256_of -
+# 要安装的 skill 目录（相对 vendor/.../skills）：PI_AWS_SKILLS 显式指定时优先，否则按 PI_BEDROCK_SKILLS
+skills_selection() {
+  if [ -n "${PI_AWS_SKILLS:-}" ]; then printf '%s' "$PI_AWS_SKILLS"; return 0; fi
+  case "$PI_BEDROCK_SKILLS" in
+    full) printf '%s' "$PI_SKILLS_FULL" ;;
+    none) ;;
+    *) printf '%s' "$PI_SKILLS_CORE" ;;
+  esac
 }
 
-# 解压（不可信数据）到独立目录，只复制白名单内的 skill 目录，并去掉符号链接；规则文件写到 RULES_OUT
-_stage_skills() {
-  local archive="$1" stage="$2" rules_out="$3" src root s
-  src="$(dirname "$archive")/src"
-  mkdir -p "$src" "$stage"
-  tar -xzf "$archive" -C "$src" --no-same-owner --no-same-permissions || return 1
-  root="$(find "$src" -mindepth 1 -maxdepth 1 -type d | head -n1)"
-  [ -d "$root/skills" ] || { log_error "压缩包中没有 skills 目录"; return 1; }
-  for s in $PI_AWS_SKILLS; do
-    if ! [[ "$s" =~ ^(core|specialized)-skills/[a-z0-9-]+$ ]]; then
-      log_warn "忽略非法的 skill 路径: $s"
-    elif [ -d "$root/skills/$s" ]; then
-      cp -R "$root/skills/$s" "$stage/"
-    else
-      log_warn "上游未找到 skill: ${s}（ref ${PI_AWS_TOOLKIT_REF}）"
-    fi
-  done
-  find "$stage" -type l -delete
-  local rules="$root/rules/aws-agent-rules.md"
-  if [ -f "$rules" ] && [ ! -L "$rules" ] && [ "$(($(wc -c <"$rules")))" -le "$MAX_RULES_BYTES" ]; then
-    cp "$rules" "$rules_out"
-  else
-    log_warn "上游 rules/aws-agent-rules.md 缺失、是符号链接或过大，已忽略"
-  fi
+# vendor_field VENDOR_DIR KEY：读取 SOURCE 中的 KEY=VALUE（不 source）
+vendor_field() {
+  [ -f "$1/SOURCE" ] || return 0
+  awk -v k="$2" 'index($0, k "=") == 1 { print substr($0, length(k) + 2); exit }' "$1/SOURCE"
 }
 
+# 内容清单哈希：对 skills/ 与 rules/ 下每个文件（按路径排序）的 sha256 再做一次 sha256。
+# 输出格式与 GNU `sha256sum` 一致（"<hash>  ./path"），保证各平台计算结果相同
+skills_manifest() {
+  (cd "$1" && find ./skills ./rules -type f -print0 | LC_ALL=C sort -z |
+    while IFS= read -r -d '' f; do printf '%s  %s\n' "$(sha256_of "$f")" "$f"; done) | sha256_of -
+}
+
+# install_aws_skills VENDOR_DIR：把选中的 skill 目录复制到 skills_dir（整体替换，幂等）
 install_aws_skills() {
-  local dest tmp count
+  local vendor="$1" dest stage s list ref count
   dest="$(skills_dir)"
-  if [ -f "$dest/$SKILLS_MARKER" ] && [ "$(cat "$dest/$SKILLS_MARKER")" = "$(_skills_stamp)" ] &&
-    [ -f "$PI_BEDROCK_HOME/rules/aws-agent-rules.md" ]; then
-    log_info "AWS skills 已是最新（ref ${PI_AWS_TOOLKIT_REF:0:7}），跳过"
-    return 0
-  fi
+  list="$(skills_selection)"
   if [ -e "$dest" ] && [ ! -f "$dest/$SKILLS_MARKER" ]; then
     log_warn "$dest 已存在且不由本工具管理，跳过 skills 安装"
     return 0
   fi
-  [[ "$PI_AWS_TOOLKIT_TARBALL_URL" =~ ^https:// ]] || die "PI_AWS_TOOLKIT_TARBALL_URL 必须使用 https"
-
-  tmp="$(mktemp -d)"
-  log_info "下载 Agent Toolkit for AWS skills（$PI_AWS_TOOLKIT_REPO@${PI_AWS_TOOLKIT_REF:0:7}）"
-  if ! download "$PI_AWS_TOOLKIT_TARBALL_URL" "$tmp/toolkit.tgz" ||
-    ! _stage_skills "$tmp/toolkit.tgz" "$tmp/stage" "$tmp/rules.md"; then
-    rm -rf "$tmp"
-    log_warn "AWS skills 安装失败，已跳过（模型仍可通过 aws___retrieve_skill 在线获取 skills）"
+  if [ -z "$list" ]; then remove_aws_skills; return 0; fi
+  if [ ! -d "$vendor/skills" ]; then
+    log_warn "缺少内置 skills（${vendor}/skills），已跳过（模型仍可通过 aws___retrieve_skill 在线获取 skills）"
     return 0
   fi
-  local manifest
-  manifest="$(_skills_manifest "$tmp/stage" "$tmp/rules.md")"
-  if [ "$PI_AWS_SKILLS_SHA256" != skip ] && [ "$manifest" != "$PI_AWS_SKILLS_SHA256" ]; then
-    rm -rf "$tmp"
-    log_warn "AWS skills 内容校验失败（期望 ${PI_AWS_SKILLS_SHA256}，实际 ${manifest}），已跳过安装"
-    log_warn "若你有意修改了 PI_AWS_TOOLKIT_REF / PI_AWS_SKILLS，请审阅内容后设置 PI_AWS_SKILLS_SHA256=$manifest 重新安装"
+  ref="$(vendor_field "$vendor" REF)"
+  # 内置副本与 SOURCE 记录的内容清单哈希一致才安装（防止被改动的检出把任意内容写入 skills / AGENTS.md）
+  local expected actual
+  expected="$(vendor_field "$vendor" MANIFEST)"
+  actual="$(skills_manifest "$vendor")"
+  if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
+    log_warn "内置 skills 内容与 ${vendor}/SOURCE 记录的哈希不一致（期望 ${expected:-无}，实际 ${actual}），已跳过 skills 安装；请重新获取本仓库"
     return 0
   fi
-  mkdir -p "$PI_BEDROCK_HOME/rules"
-  if [ -f "$tmp/rules.md" ]; then cp -f "$tmp/rules.md" "$PI_BEDROCK_HOME/rules/aws-agent-rules.md"; fi
-  _skills_stamp >"$tmp/stage/$SKILLS_MARKER"
-  rm -rf "$dest"
   mkdir -p "$(dirname "$dest")"
-  mv "$tmp/stage" "$dest"
-  rm -rf "$tmp"
+  stage="$(mktemp -d "$(dirname "$dest")/.aws-agent-toolkit.XXXXXX")"
+  for s in $list; do
+    if ! [[ "$s" =~ ^(core|specialized)-skills/[a-z0-9-]+$ ]]; then
+      log_warn "忽略非法的 skill 路径: $s"
+    elif [ -d "$vendor/skills/$s" ]; then
+      cp -R "$vendor/skills/$s" "$stage/"
+    else
+      log_warn "内置 skills 中没有 ${s}（可运行 scripts/sync-aws-skills.sh 同步）"
+    fi
+  done
+  find "$stage" -type l -delete
+  printf '%s %s\n' "${ref:-unknown}" "$list" >"$stage/$SKILLS_MARKER"
+  rm -rf "$dest"
+  mv "$stage" "$dest"
   count="$(find "$dest" -name SKILL.md | wc -l | tr -d ' ')"
-  log_info "已安装 $count 个 AWS skills 到 $dest"
+  log_info "已安装 $count 个 AWS skills 到 ${dest}（${PI_AWS_SKILLS:+自定义列表}${PI_AWS_SKILLS:-$PI_BEDROCK_SKILLS}，$(vendor_field "$vendor" REPO)@${ref:0:7}）"
 }
 
 remove_aws_skills() {
@@ -105,17 +93,21 @@ remove_aws_skills() {
   return 0
 }
 
-# install_agent_rules TEMPLATE：把运维规则 + 官方 aws-agent-rules 写入 AGENTS.md 托管段落（不影响段落外的用户内容）
+# install_agent_rules TEMPLATE VENDOR_DIR：把运维规则 + 官方 aws-agent-rules 写入 AGENTS.md 托管段落（不影响段落外的用户内容）
 install_agent_rules() {
-  local template="$1" official="$PI_BEDROCK_HOME/rules/aws-agent-rules.md"
+  local template="$1" vendor="${2:-}" official
+  official="$vendor/rules/aws-agent-rules.md"
   {
     printf '<!-- 由 pi-cli-bedrock 管理，uninstall.sh 会移除本段；自定义内容请写在本段之外 -->\n'
     cat "$template"
-    if [ -f "$official" ]; then
-      printf '\n<!-- 以下来自 %s@%s rules/aws-agent-rules.md（Apache-2.0） -->\n' "$PI_AWS_TOOLKIT_REPO" "${PI_AWS_TOOLKIT_REF:0:7}"
+    # 官方规则同样受内容清单保护：仅在 skills 校验通过（已安装）时写入
+    if [ -n "$vendor" ] && [ -f "$official" ] && [ -f "$(skills_dir)/$SKILLS_MARKER" ]; then
+      printf '\n<!-- 以下来自 %s@%s rules/aws-agent-rules.md（Apache-2.0） -->\n' "$(vendor_field "$vendor" REPO)" "$(vendor_field "$vendor" REF | cut -c1-7)"
       cat "$official"
     fi
   } | write_marked_block "$PI_CODING_AGENT_DIR/AGENTS.md" "$AGENTS_MARKER_BEGIN" "$AGENTS_MARKER_END"
+  # 旧版本把官方规则下载到 $PI_BEDROCK_HOME/rules，现已改为直接读取内置副本
+  rm -rf "$PI_BEDROCK_HOME/rules"
 }
 
 remove_agent_rules() {

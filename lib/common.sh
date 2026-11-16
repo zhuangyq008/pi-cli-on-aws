@@ -193,6 +193,26 @@ path_immutable() {
   done
 }
 
+# add_runtime_root DIR：pi / MCP 代理使用的运行时位于当前用户可写的目录（nvm、Homebrew、pyenv 等）时，
+# 记录到 PI_GUARD_RUNTIME_ROOTS（冒号分隔，写入 env 文件），aws-ops-guard 对写入这些目录的操作要求人工确认
+add_runtime_root() {
+  local dir="$1"
+  dir="${dir%/}"
+  [[ "$dir" =~ ^/[A-Za-z0-9._/@+-]+$ ]] || return 0
+  # 过于宽泛的目录（例如 ~/bin/node 的上两级就是 HOME 目录）会让无关命令频繁触发确认：只保留更具体的目录
+  case "$dir" in
+    /usr | /usr/local | /opt | /opt/homebrew | /opt/local | /home | /Users | /tmp | "$HOME" | "$HOME/.local" | "$HOME/.local/share") return 0 ;;
+  esac
+  case ":${PI_GUARD_RUNTIME_ROOTS:-}:" in *":$dir:"*) return 0 ;; esac
+  PI_GUARD_RUNTIME_ROOTS="${PI_GUARD_RUNTIME_ROOTS:+$PI_GUARD_RUNTIME_ROOTS:}$dir"
+}
+
+# add_runtime_alias REAL_PATH：Homebrew 的 Cellar/<formula>/<版本> 另有稳定别名 opt/<formula>（符号链接），一并加入
+add_runtime_alias() {
+  [[ "$1" =~ ^(/.+)/Cellar/([A-Za-z0-9._@+-]+)/[^/]+(/|$) ]] && add_runtime_root "${BASH_REMATCH[1]}/opt/${BASH_REMATCH[2]}"
+  return 0
+}
+
 # resolve_path PATH：解析符号链接后的绝对路径（macOS 旧版 readlink 不支持 -f）
 resolve_path() {
   if readlink -f / >/dev/null 2>&1; then

@@ -57,7 +57,7 @@ pi
 3. 在 Git Bash 中运行 `install.sh`：凭证引导、私有 Node.js / pi / MCP 代理 / skills / 护栏，与 Linux 相同
 4. 生成 `pi.cmd`、`pi-bedrock-doctor.cmd`、`pi-bedrock-login.cmd`，并把 `%USERPROFILE%\.local\bin` 加入**用户** PATH；在 Git Bash 中直接运行 `pi` 同样可用
 
-参数与 `install.sh` 对应：`-Region`、`-NoProbe`、`-Model`、`-Thinking`、`-NoMcp`、`-NoSkills`、`-AllModels`、`-GitBash <bash.exe 路径>`、`-InstallAwsCli`。
+参数与 `install.sh` 对应：`-Region`、`-NoProbe`、`-Model`、`-Thinking`、`-NoMcp`、`-NoSkills`、`-Skills core|full|none`、`-AllModels`、`-GitBash <bash.exe 路径>`、`-InstallAwsCli`。
 
 Windows 上的差异：
 
@@ -98,16 +98,44 @@ bash install.sh [选项]
   --model ID          默认模型（默认: global.moonshotai.kimi-k3.1）
   --thinking LEVEL    默认思考等级 off|minimal|low|medium|high|xhigh|max（默认: medium）
   --pi-version VER    pi 版本（默认: 1.5.2，可设为 latest）
-  --node MODE         auto|private|system（默认: auto）
-  --no-mcp            不安装 AWS MCP Server（节省约 220 MB）
-  --no-skills         不预装 AWS 运维 skills 与规则文件
+  --node MODE         auto|private|system（默认: auto，复用 PATH 中 >= 22.19 的 Node.js）
+  --python MODE       MCP 代理的 Python：auto|managed|system（默认: auto，复用 PATH 中的 3.11–3.14）
+  --no-mcp            不安装 AWS MCP Server（节省约 120–230 MB）
+  --skills SET        预装的 AWS 运维 skills：core|full|none（默认: core）
+  --no-skills         同 --skills none（不装 skills 与规则文件）
   --all-models        /model 显示全部内置模型（默认只启用当前区域可用的模型）
   --no-bashrc         不修改 ~/.bashrc
 ```
 
-Windows 使用 `install.ps1` 的同名参数（见"本地安装：Windows"）。
+Windows 使用 `install.ps1` 的同名参数（见"本地安装：Windows"；`-Skills core|full|none`）。Windows 上始终使用私有 Node.js、固定版本的 uv 与托管 Python（不复用本机版本）。
 
-安装器是幂等的：重复运行会跳过已安装组件、重新探测区域并刷新配置；重新运行时加 `--no-mcp` / `--no-skills` 会移除之前安装的对应组件。使用自定义 `PI_BEDROCK_HOME` / `PI_BIN_DIR` / `PI_CODING_AGENT_DIR` 时，路径会记录在 env 文件中，卸载时自动沿用。
+### 复用本机已有的 Node.js / uv / Python
+
+| 组件 | auto（默认）的行为 | 强制隔离 |
+|---|---|---|
+| Node.js | PATH 中的 `node` >= 22.19 且同目录有 `npm` 时复用（含 nvm / Homebrew / volta 等；版本管理器的 shim 会解析为真实路径），否则下载私有 Node.js（约 30 MB 下载，135 MB 磁盘） | `--node private` |
+| uv | PATH 中的 `uv` >= 0.5.0 时复用（Linux / macOS；只在安装时运行，依赖始终 `--require-hashes` 校验），否则下载固定版本（约 17 MB） | — |
+| Python（MCP 代理） | PATH 中的 `python3.13` / `3.12` / `3.11` / `3.14` / `python3` 版本在 3.11–3.14 时复用（跳过虚拟环境中的 Python 与 macOS 的 `/usr/bin/python3`），否则由 uv 下载托管 Python（约 30 MB 下载，90 MB 磁盘） | `--python managed` |
+
+pi 以复用的 Node.js 运行、MCP 代理以复用的 Python 运行，两者都持有 AWS 凭证。若它们位于**当前用户可写**的目录（nvm、Homebrew、pyenv 等），安装器会把其安装目录记录到 env 文件的 `PI_GUARD_RUNTIME_ROOTS`，aws-ops-guard 对 agent 写入这些目录、以及用版本管理器安装 / 升级 / 卸载运行时（`brew upgrade`、`nvm uninstall`、`pyenv uninstall` 等）的操作要求人工确认（`pi-bedrock-doctor` 会列出这些目录）。这是**尽力而为**的静态检查（覆盖 cp / mv / ln / tee / 重定向 / `sed -i` / 解释器内联代码、`cd` 后的相对路径、简单变量与通配符），无法覆盖任意脚本或复杂展开；客户生产账号或需要与用户环境完全隔离时，使用 `--node private --python managed`（运行时位于 `~/.local/share/pi-bedrock`，护栏对该目录的任何访问都要求确认）。
+
+复用的 Node.js / Python 之后被卸载或升级到其他位置时，`pi` 与 `pi-bedrock-doctor` 会提示重新运行 `install.sh`。
+
+### 运维 skills
+
+skills 内置在本仓库的 `vendor/agent-toolkit-for-aws/`（[aws/agent-toolkit-for-aws](https://github.com/aws/agent-toolkit-for-aws) 固定 commit，Apache-2.0），安装时不联网。每个 skill 的描述都会进入每轮请求的 system prompt，因此默认只装日常运维需要的 core 集合；其余 skill 可由模型通过 AWS MCP 的 `aws___retrieve_skill` 在线获取。
+
+| 集合 | skills |
+|---|---|
+| `core`（默认，9 个） | aws-billing-and-cost-management、aws-observability、aws-investigation、aws-iam、operations-skills（CloudWatch 可观测、告警通知、CloudTrail 多区域、网络监控、应用故障排查） |
+| `full`（19 个） | core + aws-security、aws-well-architected-review、resilience-skills（Resilience Hub、ARC、FIS 等 7 个） |
+| `none` | 不装 skills 与运维规则 |
+
+也可以用 `PI_AWS_SKILLS="core-skills/aws-iam specialized-skills/operations-skills"` 指定 `vendor/agent-toolkit-for-aws/skills/` 下的任意目录组合。
+
+安装器是幂等的：重复运行会跳过已安装组件、重新探测区域并刷新配置；重新运行时加 `--no-mcp` / `--skills none` 会移除之前安装的对应组件，切换 `--skills` 集合会整体替换已装的 skills。
+
+Bedrock 区域探测、MCP 代理安装（uv / Python / 依赖）与 Node.js / pi 安装在后台并行进行，后台任务的日志在完成后统一显示。使用自定义 `PI_BEDROCK_HOME` / `PI_BIN_DIR` / `PI_CODING_AGENT_DIR` 时，路径会记录在 env 文件中，卸载时自动沿用。
 
 ## 运行时环境变量
 
@@ -123,11 +151,11 @@ Windows 使用 `install.ps1` 的同名参数（见"本地安装：Windows"）。
 | 路径 | 内容 | 卸载时 |
 |---|---|---|
 | `~/.local/bin/pi`、`pi-bedrock-doctor` | 包装器与自检脚本 | 删除（若安装前有同名文件则恢复） |
-| `~/.local/share/pi-bedrock/` | 私有 Node、pi、uv、Python、MCP proxy、env 配置、`settings.orig.json`（安装前的原值） | 删除 |
+| `~/.local/share/pi-bedrock/` | pi、MCP proxy、env 配置、`settings.orig.json`（安装前的原值）；未复用本机版本时还有私有 Node、uv、托管 Python | 删除（复用的本机 Node / uv / Python 不受影响） |
 | `~/.pi/agent/settings.json` | `defaultProvider` / `defaultModel` / `defaultThinkingLevel` / `enabledModels` / `shellCommandPrefix` / `selfUpdateCommand` | 恢复安装前的原值（安装后被用户改过的保留） |
 | `~/.pi/agent/mcp.json` | `aws-mcp` 条目（不覆盖用户自建的同名条目） | 删除该条目 |
 | `~/.pi/agent/AGENTS.md` | 托管段落（段落外的用户内容不受影响） | 删除该段落 |
-| `~/.pi/agent/skills/aws-agent-toolkit/` | 官方 skills | 删除 |
+| `~/.pi/agent/skills/aws-agent-toolkit/` | 官方 skills（`--skills` 选择的集合） | 删除 |
 | `~/.pi/agent/extensions/aws-ops-guard/` | 写操作护栏（只读；原有同名目录备份到 `~/.pi/agent/.pi-bedrock-backup/`） | 删除并恢复备份 |
 | `~/.bashrc` | 托管段落：把 `~/.local/bin` 加到 PATH | 删除该段落 |
 | `~/.aws/credentials`、`~/.aws/config` | 仅在凭证引导中选择 1 / 2 / 3 时写入 `[pi-bedrock]` profile | **保留**（可用 `aws configure` 管理） |
@@ -139,7 +167,7 @@ Windows 使用 `install.ps1` 的同名参数（见"本地安装：Windows"）。
 
 ## 更新
 
-获取最新源码后重新运行安装器即可，过程是增量的：已安装的 Node.js、pi、MCP proxy、skills 会跳过，运维规则（`~/.pi/agent/AGENTS.md` 托管段落）、护栏扩展、包装器与 settings 会更新为新版本。请使用**与首次安装相同的参数**（例如首次用了 `--no-mcp`，更新时也要带上，否则会重新安装 MCP）。
+获取最新源码后重新运行安装器即可，过程是增量的：已安装的 Node.js、pi、MCP proxy 会跳过，skills 按 `--skills` 重新复制（本地复制，不联网），运维规则（`~/.pi/agent/AGENTS.md` 托管段落）、护栏扩展、包装器与 settings 会更新为新版本。请使用**与首次安装相同的参数**（例如首次用了 `--no-mcp`，更新时也要带上，否则会重新安装 MCP）。
 
 CloudShell / macOS / Linux：
 

@@ -4,6 +4,7 @@
 //   - awsLabels 非空：命令需要 AWS 凭证，人工确认后才带凭证执行
 //   - guardFindings 非空：篡改护栏 / 读取凭证 / 持久化安装等，无论是否带凭证都需要人工确认
 // 本文件的启发式分析只影响"是否提示"与提示文案；凭证默认剥离保证了漏判时的安全。
+import { runtimeFindings } from "./runtime.ts";
 import { posix } from "node:path";
 import { parseAwsInvocation, READ_SUFFIX } from "./awscli.ts";
 import { credentialTextPattern, protectedTextPattern, windowsKey } from "./paths.ts";
@@ -25,6 +26,8 @@ export interface ShellOptions {
   readonly platform?: string;
   /** Windows：当前用户可写的 Git for Windows 根目录（改写其中的 bash.exe / env.exe 可劫持 bash 工具） */
   readonly windowsGitRoot?: string;
+  /** pi / MCP 代理复用的、当前用户可写的 Node.js / Python 安装目录（nvm、Homebrew、pyenv 等；见 PI_GUARD_RUNTIME_ROOTS） */
+  readonly runtimeRoots?: readonly string[];
 }
 
 export interface BashAssessment {
@@ -348,6 +351,7 @@ export function assessBashCommand(command: string, options: ShellOptions = {}): 
   if (variants.some((v) => protectedText.test(v))) guard.push("访问 pi / 护栏 / AWS 配置 / shell 启动文件等受保护位置");
   if (variants.some((v) => credentialText.test(v))) guard.push("访问 AWS 凭证");
   if (windows) guard.push(...windowsTextFindings(slashed, joined, options));
+  guard.push(...runtimeFindings(tokenize(joined), { roots: options.runtimeRoots ?? [], home: options.home ?? "/", cwd: options.cwd ?? "/", realpath: options.realpath }));
   if (USER_INSTALLERS.test(squashed)) guard.push("安装软件或计划任务到用户环境（可能覆盖 ~/.local/bin 中的命令）");
   const sdk = SDK_TEXT.test(squashed) ? ["使用 AWS SDK（无法静态判断）"] : [];
   const segments = merge(tokenize(joined).map((words) => assessSegment(words, joined, options)));

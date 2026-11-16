@@ -29,4 +29,9 @@ case "$(uname -s)" in
     MSYS2_ARG_CONV_EXCL='*' exec "$PI_BEDROCK_NODE_BIN/node" "$PI_BEDROCK_PI_BIN" "$@"
     ;;
 esac
+# 复用的系统 Node（nvm / Homebrew 等）可能已被卸载或升级到不兼容的位置
+if [ ! -x "$PI_BEDROCK_NODE_BIN/node" ]; then
+  echo "pi-bedrock: 未找到 Node.js（${PI_BEDROCK_NODE_BIN}/node），可能已被卸载或移动，请重新运行 install.sh" >&2
+  exit 1
+fi
 exec "$PI_BEDROCK_NODE_BIN/node" "$PI_BEDROCK_PI_BIN" "$@"
